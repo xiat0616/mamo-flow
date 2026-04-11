@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypedDict, get_type_hints
@@ -14,6 +15,7 @@ from sklearn.model_selection import train_test_split
 from torch import Tensor
 from torchvision import transforms
 
+sys.path.append("..")
 from utils import seed_worker
 
 
@@ -90,20 +92,6 @@ def preprocess_breast(image_path: str | os.PathLike) -> np.ndarray:
     return image.astype(np.uint8)
 
 
-def normalize_label_key(label: str) -> str:
-    mapping = {
-        "tissueden": "density",
-        "density": "density",
-        "SimpleModelLabel": "scanner",
-        "scanner": "scanner",
-        "ViewLabel": "view",
-        "view": "view",
-    }
-    if label not in mapping:
-        raise ValueError(f"Unsupported label: {label}")
-    return mapping[label]
-
-
 def get_target_hw(args: argparse.Namespace) -> tuple[int, int]:
     if hasattr(args, "img_height") and hasattr(args, "img_width"):
         return int(args.img_height), int(args.img_width)
@@ -118,12 +106,64 @@ def get_target_hw(args: argparse.Namespace) -> tuple[int, int]:
     )
 
 
+def normalize_domain_arg(
+    domain: int | str | list[int] | list[str] | tuple[int, ...] | None,
+) -> list[int] | None:
+    if domain in (None, "None"):
+        return None
+
+    if isinstance(domain, (list, tuple, set)):
+        return [int(d) for d in domain]
+
+    if isinstance(domain, str) and "," in domain:
+        return [int(d.strip()) for d in domain.split(",")]
+
+    return [int(domain)]
+
+
+def normalize_model_arg(
+    model: int | str | list[int] | list[str] | tuple[int, ...] | None,
+) -> list[int] | None:
+    if model in (None, "None"):
+        return None
+
+    if isinstance(model, (list, tuple, set)):
+        return [int(m) for m in model]
+
+    if isinstance(model, str) and "," in model:
+        return [int(m.strip()) for m in model.split(",")]
+
+    return [int(model)]
+
+
+def validate_parents(parents: list[str] | tuple[str, ...] | None) -> list[str]:
+    if parents is None or len(parents) == 0:
+        raise ValueError(
+            "args.parents must be provided explicitly, e.g. "
+            "--parents age view density scanner cview"
+        )
+
+    allowed = list(get_type_hints(Metadata).keys())
+    invalid = [p for p in parents if p not in allowed]
+    if invalid:
+        raise ValueError(f"Invalid parent(s): {invalid}. Allowed: {allowed}")
+
+    # deduplicate while preserving order
+    seen = set()
+    out = []
+    for p in parents:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
 def get_embed_df(
     csv_filepath: str,
     image_root: str | os.PathLike | None = None,
     exclude_cviews: bool = True,
-    domain: int | str | None = None,
-    model: int | str | None = None,
+    domain: int | str | list[int] | list[str] | tuple[int, ...] | None = None,
+    model: int | str | list[int] | list[str] | tuple[int, ...] | None = None,
     hold_out_model_5: bool = True,
 ) -> pd.DataFrame:
     image_root = DEFAULT_IMAGE_ROOT if image_root is None else Path(image_root)
@@ -161,47 +201,36 @@ def get_embed_df(
     if hold_out_model_5:
         df = df.loc[df["scanner"] != 5].copy()
 
-    if domain not in (None, "None"):
-        domain = int(domain)
-        df = df.loc[df["manufacturer_domain"] == domain].copy()
-        if domain == DOMAIN_MAP["HOLOGIC, Inc."]:
-            df = df.loc[df["ManufacturerModelName"] == "Selenia Dimensions"].copy()
+    domains = normalize_domain_arg(domain)
+    if domains is not None:
+        df = df.loc[df["manufacturer_domain"].isin(domains)].copy()
 
-    if model not in (None, "None"):
-        df = df.loc[df["scanner"] == int(model)].copy()
+        if DOMAIN_MAP["HOLOGIC, Inc."] in domains:
+            hologic_mask = df["manufacturer_domain"] == DOMAIN_MAP["HOLOGIC, Inc."]
+            df = df.loc[
+                (~hologic_mask) | (df["ManufacturerModelName"] == "Selenia Dimensions")
+            ].copy()
+
+    models = normalize_model_arg(model)
+    if models is not None:
+        df = df.loc[df["scanner"].isin(models)].copy()
 
     return df
 
 
 def split_df(
     df: pd.DataFrame,
-    label_key: str,
     seed: int = 33,
     prop_train: float = 1.0,
     num_valid_patients: int = 600,
 ) -> dict[str, pd.DataFrame]:
     patient_ids = df["empi_anon"].unique()
 
-    if label_key == "density":
-        y = (
-            df.groupby("empi_anon")[label_key]
-            .unique()
-            .apply(lambda x: x[0])
-            .reindex(patient_ids)
-            .values
-        )
-        train_id, holdout_id = train_test_split(
-            patient_ids,
-            test_size=0.25,
-            random_state=seed,
-            stratify=y,
-        )
-    else:
-        train_id, holdout_id = train_test_split(
-            patient_ids,
-            test_size=0.25,
-            random_state=seed,
-        )
+    train_id, holdout_id = train_test_split(
+        patient_ids,
+        test_size=0.25,
+        random_state=seed,
+    )
 
     if prop_train < 1.0:
         train_id = np.sort(train_id)
@@ -259,7 +288,6 @@ class EMBED(torch.utils.data.Dataset):
         parents: list[str] | None = None,
         cache_root: str | None = None,
         image_shape: tuple[int, int, int] | None = None,
-        label_key: str = "density",
     ):
         super().__init__()
         self.root = root
@@ -267,7 +295,6 @@ class EMBED(torch.utils.data.Dataset):
         self.transform = transform
         self.cache_root = cache_root
         self.image_shape = image_shape
-        self.label_key = label_key
 
         if cache_root is not None:
             print(f"Using {split} memmap...")
@@ -287,7 +314,7 @@ class EMBED(torch.utils.data.Dataset):
             assert os.path.exists(self.cache_root)
 
         self.cache = None  # lazy
-        self.parents = None if parents is None else set(parents)  # set for O(1)
+        self.parents = validate_parents(parents)
         self.df = df.reset_index(drop=True)
 
     def _maybe_get_cache(self) -> None:
@@ -302,7 +329,7 @@ class EMBED(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.df)
 
-    def __getitem__(self, idx: int) -> dict[str, Tensor | Metadata | str]:
+    def __getitem__(self, idx: int) -> dict[str, Tensor | dict[str, float | int] | str]:
         self._maybe_get_cache()  # lazy
         while True:
             try:  # NOTE: hack to handle corrupted images, fix later
@@ -323,20 +350,18 @@ class EMBED(torch.utils.data.Dataset):
         if self.transform is not None:
             image = self.transform(image)
 
-        if self.parents is not None:
-            metadata = {k: v for k, v in metadata.items() if k in self.parents}
+        pa = {k: metadata[k] for k in self.parents}
 
         return dict(
             x=image,
-            pa=metadata,
-            y=torch.tensor(int(row[self.label_key])).long(),
+            pa=pa,
             shortpath=str(row["shortpath"]),
-            scanner_int=torch.tensor(int(row["scanner"])).long(),
         )
 
 
 def get_embed(args: argparse.Namespace) -> dict[str, EMBED]:
     input_ch = args.img_channels if hasattr(args, "img_channels") else args.in_channels
+    parents = validate_parents(getattr(args, "parents", None))
 
     if (input_ch > 3) and (args.cache_dir is not None):  # is latent
         assert args.vae_ckpt is not None
@@ -359,8 +384,6 @@ def get_embed(args: argparse.Namespace) -> dict[str, EMBED]:
         )
         image_shape = (1, img_height, img_width)
 
-    label_key = normalize_label_key(getattr(args, "label", "tissueden"))
-
     df = get_embed_df(
         csv_filepath=args.csv_filepath,
         image_root=getattr(args, "data_dir", None),
@@ -372,7 +395,6 @@ def get_embed(args: argparse.Namespace) -> dict[str, EMBED]:
 
     split_dfs = split_df(
         df=df,
-        label_key=label_key,
         seed=getattr(args, "split_seed", 33),
         prop_train=getattr(args, "prop_train", 1.0),
         num_valid_patients=getattr(args, "num_valid_patients", 600),
@@ -384,10 +406,9 @@ def get_embed(args: argparse.Namespace) -> dict[str, EMBED]:
             df=split_dfs[k],
             split=k,
             transform=transform,
-            parents=getattr(args, "parents", list(CLASS_SCHEMA)),
+            parents=parents,
             cache_root=getattr(args, "cache_dir", None),
             image_shape=image_shape,
-            label_key=label_key,
         )
         for k in ["train", "valid", "test"]
     }
@@ -436,9 +457,9 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default=str(DEFAULT_IMAGE_ROOT))
     parser.add_argument("--csv_filepath", type=str, default="joined_simple.csv")
     parser.add_argument("--cache_dir", type=str, default=None)
-    parser.add_argument("--label", type=str, default="tissueden")
-    parser.add_argument("--domain", type=str, default=None)
-    parser.add_argument("--model", type=str, default=None)
+    parser.add_argument("--parents", type=str, nargs="+", required=True)
+    parser.add_argument("--domain", type=str, nargs="+", default=None)
+    parser.add_argument("--model", type=str, nargs="+", default=None)
     parser.add_argument("--exclude_cviews", type=int, default=1)
     parser.add_argument("--hold_out_model_5", type=int, default=1)
     parser.add_argument("--prop_train", type=float, default=1.0)
