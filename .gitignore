@@ -1,4 +1,6 @@
 .venv
 *.pyc
+src/flow_proto.egg-info
 __pycache__/
 .ipynb_checkpoints/
+src/data_handle/EMBED_meta.csv
