@@ -204,7 +204,7 @@ def plot_counterfactuals(
     file_path: str | None = None,
     **kwargs,
 ) -> None:
-    from datasets import CLASS_SCHEMA
+    from data_handle.datasets import CLASS_SCHEMA
 
     bs = x.shape[0]
     do_pa = {k: v.clone() for k, v in pa.items()}

@@ -226,10 +226,10 @@ class UNet(torch.nn.Module):
     def __init__(self,
         img_resolution,                     # Image resolution.
         img_channels,                       # Image channels.
-        label_dim,                          # Class label dimensionality. 0 = unconditional.
+        cond_dim,                          # Conditional embedding dimensionality. 0 = unconditional.
         model_channels      = 192,          # Base multiplier for the number of channels.
         channel_mult        = [1,2,3,4],    # Per-resolution multipliers for the number of channels.
-        channel_mult_noise  = None,         # Multiplier for noise embedding dimensionality. None = select based on channel_mult.
+        channel_mult_time  = None,         # Multiplier for time embedding dimensionality. None = select based on channel_mult.
         channel_mult_emb    = None,         # Multiplier for final embedding dimensionality. None = select based on channel_mult.
         num_blocks          = 3,            # Number of residual blocks per resolution.
         attn_resolutions    = [16,8],       # List of resolutions with self-attention.
@@ -239,16 +239,16 @@ class UNet(torch.nn.Module):
     ):
         super().__init__()
         cblock = [model_channels * n for n in channel_mult]
-        cnoise = model_channels * channel_mult_noise if channel_mult_noise is not None else cblock[0]
+        ctime = model_channels * channel_mult_time if channel_mult_time is not None else cblock[0]
         cemb = model_channels * channel_mult_emb if channel_mult_emb is not None else max(cblock)
         self.label_balance = label_balance
         self.concat_balance = concat_balance
         self.out_gain = torch.nn.Parameter(torch.zeros([]))
 
         # Embedding.
-        self.emb_fourier = MPFourier(cnoise)
-        self.emb_noise = MPConv(cnoise, cemb, kernel=[])
-        self.emb_label = MPConv(label_dim, cemb, kernel=[]) if label_dim != 0 else None
+        self.emb_fourier = MPFourier(ctime)
+        self.emb_time = MPConv(ctime, cemb, kernel=[])
+        self.emb_cond = MPConv(cond_dim, cemb, kernel=[]) if cond_dim != 0 else None
 
         # Encoder.
         self.enc = torch.nn.ModuleDict()
@@ -282,11 +282,11 @@ class UNet(torch.nn.Module):
                 self.dec[f'{res}x{res}_block{idx}'] = Block(cin, cout, cemb, flavor='dec', attention=(res in attn_resolutions), **block_kwargs)
         self.out_conv = MPConv(cout, img_channels, kernel=[3,3])
 
-    def forward(self, x, noise_labels, class_labels):
+    def forward(self, x, time_labels, cond_emb):
         # Embedding.
-        emb = self.emb_noise(self.emb_fourier(noise_labels))
+        emb = self.emb_time(self.emb_fourier(time_labels))
         if self.emb_label is not None:
-            emb = mp_sum(emb, self.emb_label(class_labels * np.sqrt(class_labels.shape[1])), t=self.label_balance)
+            emb = mp_sum(emb, self.emb_label(cond_emb * np.sqrt(cond_emb.shape[1])), t=self.label_balance)
         emb = mp_silu(emb)
 
         # Encoder.
