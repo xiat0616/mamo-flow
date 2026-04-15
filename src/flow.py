@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 TensorOrTensors = Tensor | tuple[Tensor, ...]
 
+
 @dataclass
 class SampleConfig:
     cfg_mode: str = "none"
@@ -23,18 +24,18 @@ class BlockConfig:
 
 @dataclass
 class UNetConfig:
-    img_resolution: int
+    img_height: int
+    img_width: int
     img_channels: int
-    cond_dim: int
+    cond_embed_dim: int
     model_channels: int
     channel_mult: tuple[int, ...]
     channel_mult_time: int | None
     channel_mult_emb: int | None
     num_blocks: int
-    attn_resolutions: tuple[int, ...]
+    attn_resolutions: tuple[tuple[int, int], ...]
     label_balance: float
     concat_balance: float
-
 
 class Flow(nn.Module):
     def __init__(
@@ -115,13 +116,13 @@ class Flow(nn.Module):
         if self.cond_embedder is None or pa is None:
             raise ValueError(f"cfg_mode='{sample_args.cfg_mode}' requires both pa and cond_embedder")
 
-        full_cond = self.get_cond_emb(pa)
-        assert full_cond is not None
-
         if sample_args.cfg_mode == "cfg":
-            uncond_cond = torch.zeros_like(full_cond)
-            v_cond = self.forward_nn(y, t_batch, full_cond)
-            v_uncond = self.forward_nn(y, t_batch, uncond_cond)
+            all_keys = set(self.cond_embedder.parents)
+            cond_full = self.get_cond_emb(pa)
+            cond_null = self.get_cond_emb(pa, null_keys=all_keys)
+
+            v_cond = self.forward_nn(y, t_batch, cond_full)
+            v_uncond = self.forward_nn(y, t_batch, cond_null)
             return v_uncond + sample_args.cfg_scale * (v_cond - v_uncond)
 
         if sample_args.cfg_mode == "fcfg":

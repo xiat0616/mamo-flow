@@ -18,6 +18,34 @@ from torchvision import transforms
 sys.path.append("..")
 from utils import seed_worker
 
+from dataclasses import dataclass, field
+
+@dataclass
+class DataLoaderConfig:
+    bs: int = 16
+    num_workers: int = 4
+    prefetch_factor: int = 2
+    seed: int = 0
+    resume_step: int = 0
+
+@dataclass
+class DatasetConfig:
+    data_dir: str | None = None
+    csv_filepath: str | None = None
+    cache_dir: str | None = None
+    parents: list[str] = field(default_factory=list)
+    domain: list[str] | None = None
+    scanner_model: list[str] | None = None
+    exclude_cviews: int = 1
+    hold_out_model_5: int = 1
+    prop_train: float = 1.0
+    valid_frac: float = 0.125
+    test_frac: float = 0.125
+    split_seed: int = 33
+    img_height: int = 512
+    img_width: int = 384
+    img_channels: int = 1
+    vae_ckpt: str | None = None
 
 DEFAULT_EMBED_ROOT = Path("/vol/biodata/data/Mammo/EMBED/")
 DEFAULT_IMAGE_ROOT = DEFAULT_EMBED_ROOT / "pngs/1024x768"
@@ -121,19 +149,19 @@ def normalize_domain_arg(
     return [int(domain)]
 
 
-def normalize_model_arg(
-    model: int | str | list[int] | list[str] | tuple[int, ...] | None,
+def normalize_scanner_model_arg(
+    scanner_model: int | str | list[int] | list[str] | tuple[int, ...] | None,
 ) -> list[int] | None:
-    if model in (None, "None"):
+    if scanner_model in (None, "None"):
         return None
 
-    if isinstance(model, (list, tuple, set)):
-        return [int(m) for m in model]
+    if isinstance(scanner_model, (list, tuple, set)):
+        return [int(m) for m in scanner_model]
 
-    if isinstance(model, str) and "," in model:
-        return [int(m.strip()) for m in model.split(",")]
+    if isinstance(scanner_model, str) and "," in scanner_model:
+        return [int(m.strip()) for m in scanner_model.split(",")]
 
-    return [int(model)]
+    return [int(scanner_model)]
 
 
 def validate_parents(parents: list[str] | tuple[str, ...] | None) -> list[str]:
@@ -163,7 +191,7 @@ def get_embed_df(
     image_root: str | os.PathLike | None = None,
     exclude_cviews: bool = True,
     domain: int | str | list[int] | list[str] | tuple[int, ...] | None = None,
-    model: int | str | list[int] | list[str] | tuple[int, ...] | None = None,
+    scanner_model: int | str | list[int] | list[str] | tuple[int, ...] | None = None,
     hold_out_model_5: bool = True,
 ) -> pd.DataFrame:
     image_root = DEFAULT_IMAGE_ROOT if image_root is None else Path(image_root)
@@ -211,9 +239,10 @@ def get_embed_df(
                 (~hologic_mask) | (df["ManufacturerModelName"] == "Selenia Dimensions")
             ].copy()
 
-    models = normalize_model_arg(model)
-    if models is not None:
-        df = df.loc[df["scanner"].isin(models)].copy()
+    scanner_models = normalize_scanner_model_arg(scanner_model)
+    # Apply scanner model filtering
+    if scanner_models is not None:
+        df = df.loc[df["scanner"].isin(scanner_models)].copy()
 
     return df
 
@@ -222,13 +251,27 @@ def split_df(
     df: pd.DataFrame,
     seed: int = 33,
     prop_train: float = 1.0,
-    num_valid_patients: int = 600,
+    valid_frac: float = 0.125,
+    test_frac: float = 0.125,
 ) -> dict[str, pd.DataFrame]:
+    
+    if not (0.0 <= valid_frac < 1.0):
+        raise ValueError(f"valid_frac must be in [0, 1), got {valid_frac}")
+    if not (0.0 <= test_frac < 1.0):
+        raise ValueError(f"test_frac must be in [0, 1), got {test_frac}")
+    if valid_frac + test_frac >= 1.0:
+        raise ValueError(
+            f"valid_frac + test_frac must be < 1, got {valid_frac + test_frac}"
+        )
+
     patient_ids = df["empi_anon"].unique()
+
+    train_frac = 1.0 - valid_frac - test_frac
+    holdout_frac = valid_frac + test_frac
 
     train_id, holdout_id = train_test_split(
         patient_ids,
-        test_size=0.25,
+        train_size=train_frac,
         random_state=seed,
     )
 
@@ -244,14 +287,17 @@ def split_df(
         assert y.index[0] == train_id[0]
         train_id, _ = train_test_split(
             train_id,
-            train_size=int(prop_train * train_id.shape[0]),
+            train_size=prop_train,
             stratify=y.values,
             random_state=seed,
         )
 
-    n_valid = min(int(num_valid_patients), len(holdout_id))
-    valid_id = holdout_id[:n_valid]
-    test_id = holdout_id[n_valid:]
+    valid_frac_of_holdout = valid_frac / holdout_frac
+    valid_id, test_id = train_test_split(
+        holdout_id,
+        train_size=valid_frac_of_holdout,
+        random_state=seed,
+    )
 
     return {
         "train": df.loc[df["empi_anon"].isin(train_id)].copy(),
@@ -359,13 +405,13 @@ class EMBED(torch.utils.data.Dataset):
         )
 
 
-def get_embed(args: argparse.Namespace) -> dict[str, EMBED]:
-    input_ch = args.img_channels if hasattr(args, "img_channels") else args.in_channels
-    parents = validate_parents(getattr(args, "parents", None))
+def get_embed(cfg: DatasetConfig) -> dict[str, EMBED]:
+    input_ch = cfg.img_channels
+    parents = validate_parents(cfg.parents)
 
-    if (input_ch > 3) and (args.cache_dir is not None):  # is latent
-        assert args.vae_ckpt is not None
-        if args.vae_ckpt == "flux2":
+    if (input_ch > 3) and (cfg.cache_dir is not None):  # is latent
+        assert cfg.vae_ckpt is not None
+        if cfg.vae_ckpt == "flux2":
             assert input_ch == 32
             mean, std = [-0.061467] * input_ch, [1.633637] * input_ch
         else:  # NOTE: raddino_vae
@@ -374,40 +420,40 @@ def get_embed(args: argparse.Namespace) -> dict[str, EMBED]:
         transform = transforms.Normalize(mean=mean, std=std)
         image_shape = (input_ch, 64, 64)
     else:
-        img_height, img_width = get_target_hw(args)
         transform = transforms.Compose(
             [
                 transforms.ToPILImage(),
-                transforms.Resize((img_height, img_width)),
+                transforms.Resize((cfg.img_height, cfg.img_width)),
                 transforms.ToTensor(),
             ]
         )
-        image_shape = (1, img_height, img_width)
+        image_shape = (1, cfg.img_height, cfg.img_width)
 
     df = get_embed_df(
-        csv_filepath=args.csv_filepath,
-        image_root=getattr(args, "data_dir", None),
-        exclude_cviews=bool(getattr(args, "exclude_cviews", True)),
-        domain=getattr(args, "domain", None),
-        model=getattr(args, "model", None),
-        hold_out_model_5=bool(getattr(args, "hold_out_model_5", True)),
+        csv_filepath=cfg.csv_filepath,
+        image_root=cfg.data_dir,
+        exclude_cviews=bool(cfg.exclude_cviews),
+        domain=cfg.domain,
+        scanner_model=cfg.scanner_model,
+        hold_out_model_5=bool(cfg.hold_out_model_5),
     )
 
     split_dfs = split_df(
         df=df,
-        seed=getattr(args, "split_seed", 33),
-        prop_train=getattr(args, "prop_train", 1.0),
-        num_valid_patients=getattr(args, "num_valid_patients", 600),
+        seed=cfg.split_seed,
+        prop_train=cfg.prop_train,
+        valid_frac=cfg.valid_frac,
+        test_frac=cfg.test_frac,
     )
 
     datasets = {
         k: EMBED(
-            root=getattr(args, "data_dir", None),
+            root=cfg.data_dir,
             df=split_dfs[k],
             split=k,
             transform=transform,
             parents=parents,
-            cache_root=getattr(args, "cache_dir", None),
+            cache_root=cfg.cache_dir,
             image_shape=image_shape,
         )
         for k in ["train", "valid", "test"]
@@ -416,36 +462,36 @@ def get_embed(args: argparse.Namespace) -> dict[str, EMBED]:
 
 
 def get_dataloaders(
-    args: argparse.Namespace, datasets: dict[str, EMBED]
+    cfg: DataLoaderConfig, datasets: dict[str, EMBED]
 ) -> dict[str, torch.utils.data.DataLoader]:
     is_dist = torch.distributed.is_available() and torch.distributed.is_initialized()
     if is_dist:
         from torch.utils.data.distributed import DistributedSampler
 
-    s = int(getattr(args, "resume_step", 0))
+    s = cfg.resume_step
     rank = torch.distributed.get_rank() if is_dist else 0
 
     dataloaders = {}
     for k in ["train", "valid"]:  # NOTE: omitting test set for now
         is_train = k == "train"
-        seed, sampler = int(args.seed + (7654321 * s if is_train else 0)), None
+        seed, sampler = int(cfg.seed + (7654321 * s if is_train else 0)), None
         if is_dist:
             sampler = DistributedSampler(datasets[k], shuffle=is_train, seed=seed)
         g = torch.Generator()
         g.manual_seed(seed + rank)
         kwargs = dict(
             dataset=datasets[k],
-            batch_size=args.bs,
+            batch_size=cfg.bs,
             shuffle=(sampler is None) and is_train,
             drop_last=is_train,
             sampler=sampler,
             pin_memory=True,
-            num_workers=args.num_workers,
+            num_workers=cfg.num_workers,
             worker_init_fn=seed_worker,
             generator=g,
         )
-        if args.num_workers > 0:
-            kwargs["prefetch_factor"] = args.prefetch_factor
+        if cfg.num_workers > 0:
+            kwargs["prefetch_factor"] = cfg.prefetch_factor
             kwargs["persistent_workers"] = True
 
         dataloaders[k] = torch.utils.data.DataLoader(**kwargs)
@@ -459,23 +505,47 @@ if __name__ == "__main__":
     parser.add_argument("--cache_dir", type=str, default=None)
     parser.add_argument("--parents", type=str, nargs="+", required=True)
     parser.add_argument("--domain", type=str, nargs="+", default=None)
-    parser.add_argument("--model", type=str, nargs="+", default=None)
+    parser.add_argument("--scanner_model", type=str, nargs="+", default=None)
     parser.add_argument("--exclude_cviews", type=int, default=1)
     parser.add_argument("--hold_out_model_5", type=int, default=1)
     parser.add_argument("--prop_train", type=float, default=1.0)
-    parser.add_argument("--num_valid_patients", type=int, default=600)
+    parser.add_argument("--valid_frac", type=float, default=0.125)
+    parser.add_argument("--test_frac", type=float, default=0.125)
     parser.add_argument("--split_seed", type=int, default=33)
     parser.add_argument("--img_height", type=int, default=512)
     parser.add_argument("--img_width", type=int, default=384)
-    parser.add_argument("--in_channels", type=int, default=1)
+    parser.add_argument("--img_channels", type=int, default=1)
     parser.add_argument("--bs", type=int, default=16)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--prefetch_factor", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    datasets = get_embed(args)
-    dataloaders = get_dataloaders(args, datasets)
+    dataset_cfg = DatasetConfig(
+        data_dir=args.data_dir,
+        csv_filepath=args.csv_filepath,
+        cache_dir=args.cache_dir,
+        parents=args.parents,
+        domain=args.domain,
+        scanner_model=args.scanner_model,
+        exclude_cviews=args.exclude_cviews,
+        hold_out_model_5=args.hold_out_model_5,
+        prop_train=args.prop_train,
+        valid_frac=args.valid_frac,
+        test_frac=args.test_frac,
+        split_seed=args.split_seed,
+        img_height=args.img_height,
+        img_width=args.img_width,
+        img_channels=args.img_channels,
+    )
+    loader_cfg = DataLoaderConfig(
+        bs=args.bs,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+        seed=args.seed,
+    )
+    datasets = get_embed(dataset_cfg)
+    dataloaders = get_dataloaders(loader_cfg, datasets)
     batch = next(iter(dataloaders["train"]))
     img_shape = (1, args.img_height, args.img_width)
     assert batch["x"].shape == (args.bs, *img_shape)

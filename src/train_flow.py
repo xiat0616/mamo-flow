@@ -10,7 +10,7 @@ from torch.nn.parallel.distributed import DistributedDataParallel
 from tqdm import tqdm
 
 import wandb
-from data_handle.datasets import CLASS_SCHEMA, get_embed, get_dataloaders
+from data_handle.datasets import CLASS_SCHEMA, get_embed, get_dataloaders, DataLoaderConfig, DatasetConfig
 from utils import (
     ModelEMA,
     get_mc_stats,
@@ -20,6 +20,15 @@ from utils import (
     unwrap,
 )
 
+
+def parse_hw(s: str) -> tuple[int, int]:
+    try:
+        h, w = s.lower().split("x")
+        return int(h), int(w)
+    except Exception as e:
+        raise argparse.ArgumentTypeError(
+            f"Invalid resolution '{s}'. Expected format like 128x96."
+        ) from e
 
 def infer_parent_dims_from_batch(
     pa: dict[str, torch.Tensor],
@@ -184,22 +193,22 @@ class Trainer:
         return (total_loss / n).detach()
 
     def save_checkpoint(self, loss: float) -> None:
-        prefix = "last"
+        ckpt = {
+            "model_state_dict": unwrap(self.model).state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "ema_state": self.ema.state_dict() if self.ema is not None else None,
+            "args": vars(self.args),
+            "step": self.step,
+            "epoch": self.epoch,
+        }
+        last_path = os.path.join(self.args.save_dir, "last_checkpoint.pt")
+        torch.save(ckpt, last_path)
+        print(f"=> step: {self.step}, last model saved: {last_path}")
         if loss < self.best_loss:
             self.best_loss = loss
-            prefix = "best"
-        ckpt_path = os.path.join(self.args.save_dir, f"{prefix}_checkpoint.pt")
-        torch.save(
-            {
-                "model_state_dict": unwrap(self.model).state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "args": vars(self.args),
-                "step": self.step,
-                "epoch": self.epoch,
-            },
-            ckpt_path,
-        )
-        print(f"=> step: {self.step}, {prefix} model saved: {ckpt_path}")
+            best_path = os.path.join(self.args.save_dir, "best_checkpoint.pt")
+            torch.save(ckpt, best_path)
+            print(f"=> step: {self.step}, best model saved: {best_path}")
 
 
 if __name__ == "__main__":
@@ -212,6 +221,17 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", type=str, default=None)
     parser.add_argument("--vae_ckpt", type=str, default=None)
     parser.add_argument("--parents", nargs="+", type=str, default=list(CLASS_SCHEMA))
+    parser.add_argument("--domain", nargs="+", type=str, default=None)
+    parser.add_argument("--scanner_model", nargs="+", type=str, default=None)
+    parser.add_argument("--exclude_cviews", type=int, default=1)
+    parser.add_argument("--hold_out_model_5", type=int, default=1)
+    parser.add_argument("--prop_train", type=float, default=1.0)
+    parser.add_argument("--valid_frac", type=float, default=0.125)
+    parser.add_argument("--test_frac", type=float, default=0.125)
+    parser.add_argument("--split_seed", type=int, default=33)
+    parser.add_argument("--img_height", type=int, default=512)
+    parser.add_argument("--img_width", type=int, default=384)
+    parser.add_argument("--img_channels", type=int, default=1)
     # TRAIN
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--exp_name", type=str, default="smoke")
@@ -241,17 +261,22 @@ if __name__ == "__main__":
         choices=["per_attr", "global", "none"],
     )
     # MODELS
+    # - Unet
     sub = parser.add_subparsers(dest="model", required=False)
     p_unet = sub.add_parser("unet")
-    p_unet.add_argument("--img_resolution", type=int, default=256)
-    p_unet.add_argument("--img_channels", type=int, default=1)
-    p_unet.add_argument("--label_dim", type=int, default=0)
     p_unet.add_argument("--model_channels", type=int, default=192)
     p_unet.add_argument("--channel_mult", nargs="+", type=int, default=[1, 2, 3, 4])
-    p_unet.add_argument("--channel_mult_noise", type=int, default=None)
+    p_unet.add_argument("--cond_embed_dim", type=int, default=256)
+    p_unet.add_argument("--channel_mult_time", type=int, default=None)
     p_unet.add_argument("--channel_mult_emb", type=int, default=None)
     p_unet.add_argument("--num_blocks", type=int, default=3)
-    p_unet.add_argument("--attn_resolutions", nargs="+", type=int, default=[16, 8])
+    p_unet.add_argument(
+        "--attn_resolutions",
+        nargs="+",
+        type=parse_hw,
+        default=[(16,12)],
+        help="Attention resolutions as HxW pairs, e.g. 128x96 64x48",
+    )   
     p_unet.add_argument("--label_balance", type=float, default=0.5)
     p_unet.add_argument("--concat_balance", type=float, default=0.5)
     p_unet.add_argument("--resample_filter", nargs="+", type=int, default=[1, 1])
@@ -260,21 +285,6 @@ if __name__ == "__main__":
     p_unet.add_argument("--res_balance", type=float, default=0.3)
     p_unet.add_argument("--attn_balance", type=float, default=0.3)
     p_unet.add_argument("--clip_act", type=int, default=256)
-
-    p_transformer = sub.add_parser("transformer")
-    p_transformer.add_argument("--input_size", type=int, default=256)
-    p_transformer.add_argument("--in_channels", type=int, default=1)
-    p_transformer.add_argument("--patch_size", type=int, default=2)
-    p_transformer.add_argument("--hidden_size", type=int, default=1024)
-    p_transformer.add_argument("--depth", type=int, default=24)
-    p_transformer.add_argument("--num_heads", type=int, default=16)
-    p_transformer.add_argument("--mlp_ratio", type=float, default=8 / 3)
-    p_transformer.add_argument("--class_dropout_prob", type=float, default=0.0)
-    p_transformer.add_argument("--num_classes", type=int, default=0)  # intentional
-    p_transformer.add_argument("--learn_sigma", action="store_true", default=False)
-    p_transformer.add_argument(
-        "--grad_checkpointing", action="store_true", default=False
-    )
 
     args = parser.parse_args()
 
@@ -300,54 +310,96 @@ if __name__ == "__main__":
         torch.manual_seed(runtime_seed)
         torch.cuda.manual_seed_all(runtime_seed)
 
-    datasets = get_embed(args)
-    dataloaders = get_dataloaders(args, datasets)
+    datasets = get_embed(DatasetConfig(
+        data_dir=args.data_dir,
+        csv_filepath=args.csv_filepath,
+        cache_dir=args.cache_dir,
+        parents=args.parents,
+        domain=args.domain,
+        scanner_model=args.scanner_model,
+        exclude_cviews=args.exclude_cviews,
+        hold_out_model_5=args.hold_out_model_5,
+        prop_train=args.prop_train,
+        valid_frac=args.valid_frac,
+        test_frac=args.test_frac,
+        split_seed=args.split_seed,
+        img_height=args.img_height,
+        img_width=args.img_width,
+        img_channels=args.img_channels,
+        vae_ckpt=args.vae_ckpt,
+    ))
+    dataloaders = get_dataloaders(DataLoaderConfig(
+        bs=args.bs,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+        seed=args.seed,
+        resume_step=getattr(args, "resume_step", 0),
+    ), datasets)
 
-    args.grad_checkpointing = False  # NOTE: delete me
+    # args.grad_checkpointing = False  # NOTE: delete me
 
     # ----------------------------
     # Build model
     # ----------------------------
     if args.model == "unet":
-        from model.embedder import GlobalCondEmbedder, PerAttrCondEmbedder
+        from model.embedder import (
+            GlobalCondEmbedder,
+            PerAttrCondEmbedder,
+            CondEmbedderConfig,
+        )
         from flow import BlockConfig, Flow, UNetConfig
         from model.unet import UNet
 
-        # Infer parent input dims from one train batch.
-        # Assumes your embedder can handle [B] and [B, D] inputs.
+        # Infer raw parent input dims from one train batch
         sample_batch = next(iter(dataloaders["train"]))
         parent_dims = infer_parent_dims_from_batch(sample_batch["pa"], args.parents)
 
-        config = UNetConfig(
-            **{
-                f.name: getattr(args, f.name)
-                for f in fields(UNetConfig)
-                if f.name != "block"
-            },
-            block=BlockConfig(
-                **{f.name: getattr(args, f.name) for f in fields(BlockConfig)}
-            ),
+        cond_embed_dim = args.cond_embed_dim if (args.cond_embedder != "none" and len(args.parents) > 0) else 0
+
+        # Build configs separately
+        unet_cfg = UNetConfig(
+            img_height=args.img_height,
+            img_width=args.img_width,
+            img_channels=args.img_channels,
+            cond_embed_dim=args.cond_embed_dim,
+            model_channels=args.model_channels,
+            channel_mult=tuple(args.channel_mult),
+            channel_mult_time=args.channel_mult_time,
+            channel_mult_emb=args.channel_mult_emb,
+            num_blocks=args.num_blocks,
+            attn_resolutions=tuple(args.attn_resolutions),
+            label_balance=args.label_balance,
+            concat_balance=args.concat_balance,
         )
 
-        unet_kwargs = vars(config).copy()
-        block_kwargs = vars(unet_kwargs.pop("block"))
-        forward_nn = UNet(**unet_kwargs, **block_kwargs)
+        block_cfg = BlockConfig(
+            resample_filter=tuple(args.resample_filter),
+            channels_per_head=args.channels_per_head,
+            dropout=args.dropout,
+            res_balance=args.res_balance,
+            attn_balance=args.attn_balance,
+            clip_act=args.clip_act,
+        )
 
+        forward_nn = UNet(**vars(unet_cfg), **vars(block_cfg))
+
+        # Build cond embedder
         cond_embedder = None
         if args.cond_embedder != "none" and len(args.parents) > 0:
-            embedder_args = argparse.Namespace(
+            embedder_cfg = CondEmbedderConfig(
                 parents=args.parents,
                 parent_dims=parent_dims,
-                cond_embed_dim=forward_nn.cemb,
+                cond_embed_dim=args.cond_embed_dim,
             )
 
             if args.cond_embedder == "per_attr":
-                cond_embedder = PerAttrCondEmbedder(embedder_args)
+                cond_embedder = PerAttrCondEmbedder(embedder_cfg)
             elif args.cond_embedder == "global":
-                cond_embedder = GlobalCondEmbedder(embedder_args)
+                cond_embedder = GlobalCondEmbedder(embedder_cfg)
             else:
                 raise ValueError(f"Unknown cond_embedder: {args.cond_embedder}")
 
+        # Build flow model
         model = Flow(
             forward_nn=forward_nn,
             cond_embedder=cond_embedder,
@@ -355,21 +407,8 @@ if __name__ == "__main__":
             alpha=args.alpha,
             p_uncond=args.p_uncond,
         )
-
     elif args.model == "transformer":
-        # Left unchanged. If you later want the same abstraction for DiT,
-        # mirror the unet-path refactor here as well.
-        from flow import FlowTransformer, TransformerConfig
-
-        config = TransformerConfig(
-            **{f.name: getattr(args, f.name) for f in fields(TransformerConfig)}
-        )
-        model = FlowTransformer(
-            config=config,
-            sigma=args.sigma,
-            alpha=args.alpha,
-            parent_schema={k: CLASS_SCHEMA[k] for k in args.parents},
-        )
+        raise NotImplementedError("Transformer model not implemented yet")
     else:
         raise NotImplementedError
 
@@ -378,6 +417,8 @@ if __name__ == "__main__":
 
     model = model.to(device)
     ema = ModelEMA(model.parameters(), rate=args.ema_rate)
+    if args.resume and ckpt.get("ema_state") is not None:
+        ema.load_state_dict(ckpt["ema_state"])
 
     if is_dist:
         model = DistributedDataParallel(model, device_ids=[device], bucket_cap_mb=150)
@@ -403,7 +444,7 @@ if __name__ == "__main__":
 
     vae = None
     if rank == 0:
-        wandb.init(project="flow-proto", name=args.exp_name, config=vars(args))
+        wandb.init(project="mammo_flow", name=args.exp_name, config=vars(args))
         for k, v in vars(args).items():
             print(f"--{k}={v}")
         num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -414,14 +455,13 @@ if __name__ == "__main__":
 
             vae = get_pretrained_flux2vae()
 
-        elif args.vae_ckpt and os.path.isfile(args.vae_ckpt):
-            from vae import get_pretrained_vae
+        # elif args.vae_ckpt and os.path.isfile(args.vae_ckpt):
+        #     from vae import get_pretrained_vae
+        #     vae = get_pretrained_vae(args.vae_ckpt)
 
-            vae = get_pretrained_vae(args.vae_ckpt)
-
-    if vae is not None:  # NOTE: comment me for CPU inference
-        vae.to(device)
-        vae.eval()
+    # if vae is not None:  # NOTE: comment me for CPU inference
+    #     vae.to(device)
+    #     vae.eval()
 
     print("\ntorch:", torch.__version__)
     print("bf16 supported:", torch.cuda.is_bf16_supported())

@@ -1,7 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dataclasses import dataclass
 
+
+@dataclass
+class CondEmbedderConfig:
+    parents: list[str]
+    parent_dims: dict[str, int]
+    cond_embed_dim: int
 
 class PerAttrCondEmbedder(nn.Module):
     def __init__(self, args):
@@ -19,7 +26,6 @@ class PerAttrCondEmbedder(nn.Module):
         self.parent_embed_dim = self.cond_embed_dim // len(self.parents)
 
         self.embeddings = nn.ModuleDict()
-        self.null_embeddings = nn.ParameterDict()
 
         for key in self.parents:
             in_dim = self.parent_dims[key]
@@ -27,9 +33,6 @@ class PerAttrCondEmbedder(nn.Module):
                 nn.Linear(in_dim, self.parent_embed_dim),
                 nn.SiLU(),
                 nn.Linear(self.parent_embed_dim, self.parent_embed_dim),
-            )
-            self.null_embeddings[key] = nn.Parameter(
-                torch.zeros(1, self.parent_embed_dim)
             )
 
     def forward(self, y_dict, null_keys=None):
@@ -41,7 +44,7 @@ class PerAttrCondEmbedder(nn.Module):
             val = y_dict[key]  # [B, in_dim]
 
             if key in null_keys:
-                emb = self.null_embeddings[key].expand(val.shape[0], -1)
+                emb = torch.zeros(val.shape[0], self.parent_embed_dim, device=val.device, dtype=val.dtype)
             else:
                 emb = self.embeddings[key](val)
 
@@ -68,13 +71,17 @@ class GlobalCondEmbedder(nn.Module):
             nn.Linear(self.cond_embed_dim, self.cond_embed_dim),
         )
 
-    def forward(self, y_dict):
-        vals = []
-        for key in self.parents:
-            assert key in y_dict, f"Missing key in y_dict: {key}"
-            vals.append(y_dict[key])
+    def forward(self, y_dict, null_keys=None):
+        if null_keys is not None and len(null_keys) > 0:
+            if set(null_keys) != set(self.parents):
+                raise ValueError(
+                    "GlobalCondEmbedder only supports full nulling, not per-attribute nulling."
+                )
+            batch_size = next(iter(y_dict.values())).shape[0]
+            ref = next(iter(y_dict.values()))
+            return torch.zeros(batch_size, self.cond_embed_dim, device=ref.device, dtype=ref.dtype)
 
+        vals = [y_dict[k] for k in self.parents]
         concat_y = torch.cat(vals, dim=1)
         out = self.embed(concat_y)
-        out = F.normalize(out, p=2, dim=1)
-        return out
+        return F.normalize(out, p=2, dim=1)

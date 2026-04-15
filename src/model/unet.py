@@ -223,83 +223,133 @@ class Block(torch.nn.Module):
 
 @persistence.persistent_class
 class UNet(torch.nn.Module):
-    def __init__(self,
-        img_resolution,                     # Image resolution.
+    def __init__(
+        self,
+        img_height,                         # Image height.
+        img_width,                          # Image width.
         img_channels,                       # Image channels.
-        cond_dim,                          # Conditional embedding dimensionality. 0 = unconditional.
-        model_channels      = 192,          # Base multiplier for the number of channels.
-        channel_mult        = [1,2,3,4],    # Per-resolution multipliers for the number of channels.
-        channel_mult_time  = None,         # Multiplier for time embedding dimensionality. None = select based on channel_mult.
-        channel_mult_emb    = None,         # Multiplier for final embedding dimensionality. None = select based on channel_mult.
-        num_blocks          = 3,            # Number of residual blocks per resolution.
-        attn_resolutions    = [16,8],       # List of resolutions with self-attention.
-        label_balance       = 0.5,          # Balance between noise embedding (0) and class embedding (1).
-        concat_balance      = 0.5,          # Balance between skip connections (0) and main path (1).
-        **block_kwargs,                     # Arguments for Block.
+        cond_embed_dim,                       # Conditional embedding dimensionality. 0 = unconditional.
+        model_channels=192,                 # Base multiplier for the number of channels.
+        channel_mult=(1, 2, 3, 4),          # Per-resolution multipliers for the number of channels.
+        channel_mult_time=None,             # Multiplier for time embedding dimensionality.
+        channel_mult_emb=None,              # Multiplier for final embedding dimensionality.
+        num_blocks=3,                       # Number of residual blocks per resolution.
+        attn_resolutions=((16, 16), (8, 8)),# Spatial resolutions with self-attention.
+        label_balance=0.5,                  # Balance between time embedding and cond embedding.
+        concat_balance=0.5,                 # Balance between skip and main path.
+        **block_kwargs,
     ):
         super().__init__()
+
         cblock = [model_channels * n for n in channel_mult]
         ctime = model_channels * channel_mult_time if channel_mult_time is not None else cblock[0]
         cemb = model_channels * channel_mult_emb if channel_mult_emb is not None else max(cblock)
+
+        self.cemb = cemb
         self.label_balance = label_balance
         self.concat_balance = concat_balance
         self.out_gain = torch.nn.Parameter(torch.zeros([]))
 
+        # Normalize attention resolutions to tuples.
+        attn_resolutions = {tuple(r) for r in attn_resolutions}
+
         # Embedding.
         self.emb_fourier = MPFourier(ctime)
         self.emb_time = MPConv(ctime, cemb, kernel=[])
-        self.emb_cond = MPConv(cond_dim, cemb, kernel=[]) if cond_dim != 0 else None
+        self.emb_cond = MPConv(cond_embed_dim, cemb, kernel=[]) if cond_embed_dim != 0 else None
 
         # Encoder.
         self.enc = torch.nn.ModuleDict()
         cout = img_channels + 1
         for level, channels in enumerate(cblock):
-            res = img_resolution >> level
+            h = img_height >> level
+            w = img_width >> level
+            res_hw = (h, w)
+
             if level == 0:
                 cin = cout
                 cout = channels
-                self.enc[f'{res}x{res}_conv'] = MPConv(cin, cout, kernel=[3,3])
+                self.enc[f"{h}x{w}_conv"] = MPConv(cin, cout, kernel=[3, 3])
             else:
-                self.enc[f'{res}x{res}_down'] = Block(cout, cout, cemb, flavor='enc', resample_mode='down', **block_kwargs)
+                self.enc[f"{h}x{w}_down"] = Block(
+                    cout, cout, cemb,
+                    flavor="enc",
+                    resample_mode="down",
+                    **block_kwargs,
+                )
+
             for idx in range(num_blocks):
                 cin = cout
                 cout = channels
-                self.enc[f'{res}x{res}_block{idx}'] = Block(cin, cout, cemb, flavor='enc', attention=(res in attn_resolutions), **block_kwargs)
+                self.enc[f"{h}x{w}_block{idx}"] = Block(
+                    cin, cout, cemb,
+                    flavor="enc",
+                    attention=(res_hw in attn_resolutions),
+                    **block_kwargs,
+                )
 
         # Decoder.
         self.dec = torch.nn.ModuleDict()
         skips = [block.out_channels for block in self.enc.values()]
+
         for level, channels in reversed(list(enumerate(cblock))):
-            res = img_resolution >> level
+            h = img_height >> level
+            w = img_width >> level
+            res_hw = (h, w)
+
             if level == len(cblock) - 1:
-                self.dec[f'{res}x{res}_in0'] = Block(cout, cout, cemb, flavor='dec', attention=True, **block_kwargs)
-                self.dec[f'{res}x{res}_in1'] = Block(cout, cout, cemb, flavor='dec', **block_kwargs)
+                self.dec[f"{h}x{w}_in0"] = Block(
+                    cout, cout, cemb,
+                    flavor="dec",
+                    attention=True,
+                    **block_kwargs,
+                )
+                self.dec[f"{h}x{w}_in1"] = Block(
+                    cout, cout, cemb,
+                    flavor="dec",
+                    **block_kwargs,
+                )
             else:
-                self.dec[f'{res}x{res}_up'] = Block(cout, cout, cemb, flavor='dec', resample_mode='up', **block_kwargs)
+                self.dec[f"{h}x{w}_up"] = Block(
+                    cout, cout, cemb,
+                    flavor="dec",
+                    resample_mode="up",
+                    **block_kwargs,
+                )
+
             for idx in range(num_blocks + 1):
                 cin = cout + skips.pop()
                 cout = channels
-                self.dec[f'{res}x{res}_block{idx}'] = Block(cin, cout, cemb, flavor='dec', attention=(res in attn_resolutions), **block_kwargs)
-        self.out_conv = MPConv(cout, img_channels, kernel=[3,3])
+                self.dec[f"{h}x{w}_block{idx}"] = Block(
+                    cin, cout, cemb,
+                    flavor="dec",
+                    attention=(res_hw in attn_resolutions),
+                    **block_kwargs,
+                )
+
+        self.out_conv = MPConv(cout, img_channels, kernel=[3, 3])
 
     def forward(self, x, time_labels, cond_emb):
-        # Embedding.
         emb = self.emb_time(self.emb_fourier(time_labels))
-        if self.emb_label is not None:
-            emb = mp_sum(emb, self.emb_label(cond_emb * np.sqrt(cond_emb.shape[1])), t=self.label_balance)
+        if self.emb_cond is not None and cond_emb is not None:
+            emb = mp_sum(
+                emb,
+                self.emb_cond(cond_emb * np.sqrt(cond_emb.shape[1])),
+                t=self.label_balance,
+            )
         emb = mp_silu(emb)
 
-        # Encoder.
         x = torch.cat([x, torch.ones_like(x[:, :1])], dim=1)
+
         skips = []
         for name, block in self.enc.items():
-            x = block(x) if 'conv' in name else block(x, emb)
+            x = block(x) if "conv" in name else block(x, emb)
             skips.append(x)
 
-        # Decoder.
         for name, block in self.dec.items():
-            if 'block' in name:
+            if "block" in name:
                 x = mp_cat(x, skips.pop(), t=self.concat_balance)
             x = block(x, emb)
+
         x = self.out_conv(x, gain=self.out_gain)
         return x

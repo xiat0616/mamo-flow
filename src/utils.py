@@ -40,6 +40,13 @@ class ModelEMA:
             p.copy_(stored_p)
         del self.stored_params
 
+    def state_dict(self) -> list[torch.Tensor]:
+        return [p.clone() for p in self.ema_params]
+
+    def load_state_dict(self, state: list[torch.Tensor]) -> None:
+        for ema_p, saved_p in zip(self.ema_params, state, strict=True):
+            ema_p.copy_(saved_p)
+
 
 def seed_all(seed: int, deterministic: bool = True):
     random.seed(seed)
