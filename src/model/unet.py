@@ -3,7 +3,6 @@
 
 import numpy as np
 import torch
-from model import persistence
 
 #----------------------------------------------------------------------------
 # Cached construction of constant tensors. Avoids CPU=>GPU copy when the
@@ -105,7 +104,6 @@ def mp_cat(a, b, dim=1, t=0.5):
 #----------------------------------------------------------------------------
 # Magnitude-preserving Fourier features (Equation 75).
 
-@persistence.persistent_class
 class MPFourier(torch.nn.Module):
     def __init__(self, num_channels, bandwidth=1):
         super().__init__()
@@ -123,7 +121,6 @@ class MPFourier(torch.nn.Module):
 # Magnitude-preserving convolution or fully-connected layer (Equation 47)
 # with force weight normalization (Equation 66).
 
-@persistence.persistent_class
 class MPConv(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel):
         super().__init__()
@@ -146,7 +143,6 @@ class MPConv(torch.nn.Module):
 #----------------------------------------------------------------------------
 # U-Net encoder/decoder block with optional self-attention (Figure 21).
 
-@persistence.persistent_class
 class Block(torch.nn.Module):
     def __init__(self,
         in_channels,                    # Number of input channels.
@@ -221,7 +217,6 @@ class Block(torch.nn.Module):
 #----------------------------------------------------------------------------
 # EDM2 U-Net model (Figure 21).
 
-@persistence.persistent_class
 class UNet(torch.nn.Module):
     def __init__(
         self,

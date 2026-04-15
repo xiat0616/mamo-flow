@@ -4,3 +4,10 @@ src/flow_proto.egg-info
 __pycache__/
 .ipynb_checkpoints/
 src/data_handle/EMBED_meta.csv
+checkpoints/
+assets
+.codex
+scripts/.python-version
+.python-version
+wandb
+tea_debug.log

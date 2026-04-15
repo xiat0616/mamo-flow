@@ -3,51 +3,51 @@ name = "flow-proto"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.10,<3.12"
 dependencies = [
-    "accelerate>=1.12.0",
-    "diffusers>=0.36.0",
-    "ipykernel>=7.1.0",
-    "matplotlib>=3.10.8",
-    "numpy>=2.3.5",
-    "opencv-python>=4.13.0.92",
-    "pandas>=2.3.3",
-    "pillow>=12.0.0",
-    "requests>=2.32.4",
-    "scikit-image>=0.26.0",
-    "scikit-learn>=1.8.0",
-    "timm>=1.0.24",
-    "torch>=2.9.1",
-    "torchdiffeq>=0.2.5",
-    "torchvision>=0.24.1",
-    "tqdm>=4.67.1",
-    "transformers>=4.57.3",
-    "wandb>=0.23.1",
+    "accelerate>=0.30.0",
+    "diffusers>=0.27.0",
+    "ipykernel>=6.0.0",
+    "matplotlib>=3.8.0",
+    "numpy>=1.26.0,<2.0.0",
+    "opencv-python>=4.9.0",
+    "pandas>=2.2.0",
+    "pillow>=10.0.0",
+    "requests>=2.31.0",
+    "scikit-image>=0.22.0",
+    "scikit-learn>=1.4.0",
+    "timm>=1.0.0",
+    "torch==2.1.2",
+    "torchdiffeq>=0.2.3",
+    "torchvision==0.16.2",
+    "tqdm>=4.65.0",
+    "transformers<4.40.0",
+    "wandb>=0.16.0",
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cu118" }
+torchvision = { index = "pytorch-cu118" }
 
 [dependency-groups]
 dev = [
-    "black>=25.12.0",
-    "ipykernel>=7.1.0",
-    "pre-commit>=4.5.1",
-    "ruff>=0.14.10",
+    "black>=24.0.0",
+    "ipykernel>=6.0.0",
+    "pre-commit>=3.0.0",
+    "ruff>=0.4.0",
 ]
 
 [tool.black]
-target-version = ["py313"]
+target-version = ["py310"]
 line-length = 88
 
 [tool.ruff]
-target-version = "py314"
+target-version = "py310"
 line-length = 88
 
 [tool.ruff.lint]

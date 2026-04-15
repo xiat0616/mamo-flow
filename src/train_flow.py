@@ -30,6 +30,7 @@ def parse_hw(s: str) -> tuple[int, int]:
             f"Invalid resolution '{s}'. Expected format like 128x96."
         ) from e
 
+
 def infer_parent_dims_from_batch(
     pa: dict[str, torch.Tensor],
     parents: list[str],
@@ -56,6 +57,7 @@ class Trainer:
         scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
         ema: ModelEMA | None = None,
         vae: nn.Module | None = None,
+        amp_dtype: torch.dtype = torch.bfloat16,
     ):
         self.model = model
         self.args = args
@@ -63,6 +65,7 @@ class Trainer:
         self.scheduler = scheduler
         self.ema = ema
         self.vae = vae
+        self.amp_dtype = amp_dtype
         self.device = next(model.parameters()).device
         self.is_dist = dist.is_available() and dist.is_initialized()
         self.rank = dist.get_rank() if self.is_dist else 0
@@ -92,7 +95,7 @@ class Trainer:
                 x = (x + (torch.rand_like(x) - 0.5) / 255.0).clamp(0, 1) * 2 - 1
 
             self.model.zero_grad(set_to_none=True)
-            with torch.autocast(x.device.type, dtype=torch.bfloat16):
+            with torch.autocast(x.device.type, dtype=self.amp_dtype):
                 loss = self.model(x, pa)
             loss.backward()
             stats = dict(gnorm=nn.utils.clip_grad_norm_(self.model.parameters(), 1.0))
@@ -176,7 +179,7 @@ class Trainer:
             x = x.float().to(self.device, non_blocking=True)
             x = x * 2 - 1 if channels <= 3 else x  # [-1,1] if image
             pa = {k: v.to(self.device, non_blocking=True) for k, v in pa.items()}
-            with torch.autocast(x.device.type, dtype=torch.bfloat16):
+            with torch.autocast(x.device.type, dtype=self.amp_dtype):
                 loss = self.model(x, pa, g)
             n += bs
             total_loss += loss.detach() * bs
@@ -274,9 +277,9 @@ if __name__ == "__main__":
         "--attn_resolutions",
         nargs="+",
         type=parse_hw,
-        default=[(16,12)],
+        default=[(16, 12)],
         help="Attention resolutions as HxW pairs, e.g. 128x96 64x48",
-    )   
+    )
     p_unet.add_argument("--label_balance", type=float, default=0.5)
     p_unet.add_argument("--concat_balance", type=float, default=0.5)
     p_unet.add_argument("--resample_filter", nargs="+", type=int, default=[1, 1])
@@ -303,6 +306,8 @@ if __name__ == "__main__":
         else (torch.device("cuda:0" if torch.cuda.is_available() else "cpu"), 0, 1)
     )
     is_dist = args.dist and dist.is_available() and dist.is_initialized()
+
+    amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
     seed_all(args.seed, args.determ)
     if args.resume:
@@ -464,7 +469,8 @@ if __name__ == "__main__":
     #     vae.eval()
 
     print("\ntorch:", torch.__version__)
-    print("bf16 supported:", torch.cuda.is_bf16_supported())
+    print("bf16 supported:", torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False)
+    print("amp dtype:", amp_dtype)
     print("matmul precision:", torch.get_float32_matmul_precision())
     print(
         "sdpa backends enabled:",
@@ -477,7 +483,13 @@ if __name__ == "__main__":
         dist.barrier()
 
     trainer = Trainer(
-        model, args, optimizer=optimizer, scheduler=scheduler, ema=ema, vae=vae
+        model,
+        args,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        ema=ema,
+        vae=vae,
+        amp_dtype=amp_dtype,
     )
     if args.resume:
         trainer.step, trainer.epoch = ckpt.get("step", 0), ckpt.get("epoch", 0)

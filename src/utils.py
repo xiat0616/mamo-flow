@@ -1,6 +1,7 @@
 import builtins
 import copy
 import datetime
+import inspect
 import os
 import random
 import time
@@ -78,13 +79,16 @@ def setup_distributed() -> tuple[int, int, int]:
         world_size = 1
 
     torch.cuda.set_device(local_rank)
-    torch.distributed.init_process_group(
+    init_pg_kwargs = dict(
         backend="nccl",
         world_size=world_size,
         rank=rank,
-        device_id=local_rank,
         timeout=datetime.timedelta(minutes=30),
     )
+    # `device_id` was added in newer torch releases; keep compatibility with 2.1.x.
+    if "device_id" in inspect.signature(torch.distributed.init_process_group).parameters:
+        init_pg_kwargs["device_id"] = local_rank
+    torch.distributed.init_process_group(**init_pg_kwargs)
     print(
         f"WORLD_SIZE: {world_size}, RANK: {rank}, LOCAL_RANK: {local_rank}, "
         + f"MASTER: {os.environ['MASTER_ADDR']}:{os.environ['MASTER_PORT']}"

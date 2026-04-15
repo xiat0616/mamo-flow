@@ -14,7 +14,7 @@ p_uncond=0.2
 # optional: other useful vars
 img_channels=1
 epochs=10000
-bs=64
+bs=192
 lr=1e-4
 
 exp_name="${base_name}_flow_embed_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
@@ -26,7 +26,7 @@ ARGS=(
 # DATA
     --data_dir="/vol/biodata/data/Mammo/EMBED/pngs/1024x768"
     --csv_filepath="./assets/EMBED_meta.csv"
-    --save_dir="./checkpoints/$exp_name"
+    --save_dir="../checkpoints/$exp_name"
     --parents age view density scanner cview
     --exclude_cviews=1
     --hold_out_model_5=1
@@ -81,9 +81,9 @@ ARGS=(
 
 # # TO RESUME
 # ARGS=(
-#     --resume="./checkpoints/flow_dit/best_checkpoint.pt"
+#     --resume="../checkpoints/flow_dit/best_checkpoint.pt"
 #     --exp_name="$exp_name"
-#     --save_dir="./checkpoints/$exp_name"
+#     --save_dir="../checkpoints/$exp_name"
 # )
 
 # export NCCL_P2P_LEVEL=LOC  # comment for lora
@@ -91,30 +91,33 @@ ARGS=(
 #SBATCH --nodelist=monal04
 #SBATCH --exclude=loki
 
+NPROC_PER_NODE=3
+
 if [ "$2" == "slurm" ]; then
     sbatch <<EOF
 #!/bin/bash
 
-#SBATCH --partition=gpus24
-#SBATCH --gres=gpu:2
+#SBATCH --partition=gpus
+#SBATCH --gres=gpu:3
+#SBATCH --nodelist=monal04
 #SBATCH --output=../checkpoints/$exp_name/slurm.%j.log
 
 cd /vol/biomedic3/tx1215/mamo-flow
 uv sync --frozen
 
 nvidia-smi
-export OMP_NUM_THREADS=2
+export OMP_NUM_THREADS=4
 export TQDM_MININTERVAL=300
 export MASTER_ADDR=\$(scontrol show hostnames "\$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=\$(shuf -i 10001-29500 -n 1)  # select random port in range
 
 srun uv run torchrun \
     --nnodes=1 \
-    --nproc_per_node=2 \
+    --nproc_per_node="$NPROC_PER_NODE" \
     --rdzv_id="\$SLURM_JOB_ID" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="\$MASTER_ADDR:\$MASTER_PORT" \
-    ./src/train_flow.py ${ARGS[@]} 2>&1 | tee "../checkpoints/$exp_name/log.out"
+    ./src/train_flow.py ${ARGS[@]} 2>&1 | tee "./checkpoints/$exp_name/log.out"
 EOF
 else
     NPROC_PER_NODE=1
