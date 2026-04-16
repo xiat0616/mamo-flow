@@ -96,7 +96,7 @@ class Trainer:
             self.model.zero_grad(set_to_none=True)
             if self.amp_dtype is not None:
                 with torch.autocast(x.device.type, dtype=self.amp_dtype):
-                    loss = self.model(x, pa)
+                    loss = self.model(x, pa, g=None)
             else:
                 loss = self.model(x, pa)
 
@@ -183,9 +183,11 @@ class Trainer:
             x = x * 2 - 1 if channels <= 3 else x  # [-1,1] if image
             pa = {k: v.to(self.device, non_blocking=True) for k, v in pa.items()}
             if self.amp_dtype is not None:
+                # print("Running eval_epoch with autocast.")
                 with torch.autocast(x.device.type, dtype=self.amp_dtype):
                     loss = self.model(x, pa, g)
             else:
+                # print("Warning: amp_dtype is not set, running eval_epoch without autocast.")
                 loss = self.model(x, pa, g)
             n += bs
             total_loss += loss.detach() * bs
@@ -437,12 +439,15 @@ if __name__ == "__main__":
 
     if is_dist:
         model = DistributedDataParallel(model, device_ids=[device], bucket_cap_mb=150)
+
     # Some GPUs on our server is too old to support torch.compile, so we check the capability before compiling    
     if torch.cuda.get_device_capability(device)[0] >= 7:
-        model = torch.compile(model)
+        # model = torch.compile(model)
+        print(f"We do not use torch.compile as it reports errors, but device {device} has CUDA capability ")
     else:
         print(f"Skipping torch.compile: device {device} has CUDA capability "
-              f"{torch.cuda.get_device_capability(device)}, requires >= 7.0")
+                f"{torch.cuda.get_device_capability(device)}, requires >= 7.0")
+
 
     optimizer = torch.optim.AdamW(
         model.parameters(),

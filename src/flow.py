@@ -64,13 +64,13 @@ class Flow(nn.Module):
         g: torch.Generator | None = None,
     ) -> Tensor:
         
-        if g is None:
-            u = torch.randn_like(x)
-            t = torch.rand(x.shape[0], device=x.device)
-        else:
-            u = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=g)
-            t = torch.rand(x.shape[0], device=x.device, generator=g)
-            
+        # if g is None:
+        #     u = torch.randn_like(x)
+        #     t = torch.rand(x.shape[0], device=x.device)
+        # else:
+        u = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=g)
+        t = torch.rand(x.shape[0], device=x.device, generator=g)
+
         t = self.schedule(t, self.alpha)
         x_t = self.interpolant(u, x, t, self.sigma)
 
@@ -156,6 +156,7 @@ class Flow(nn.Module):
 
         def func(t: Tensor, y: Tensor) -> Tensor:
             if self.amp_dtype is None:
+                # print("Warning: amp_dtype is not set, running guided_vector_field without autocast.")
                 dydt = self.guided_vector_field(
                     y,
                     t,
@@ -164,6 +165,7 @@ class Flow(nn.Module):
                 )
             else:
                 with torch.autocast(y.device.type, dtype=self.amp_dtype):
+                    # print("Running guided_vector_field with autocast.")
                     dydt = self.guided_vector_field(
                         y,
                         t,
