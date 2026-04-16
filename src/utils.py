@@ -164,7 +164,7 @@ def plot_samples(
             method="euler",
             t=model.schedule(torch.linspace(0.0, 1.0, steps).to(u.device), model.alpha),
         )
-    x = model.ode_solve(u, pa=pa, **kwargs)[-1]  # type: ignore
+    x = model.ode_solve(x=u, pa=pa, **kwargs)[-1]  # type: ignore
     if isinstance(vae, torch.nn.Module):
         # NOTE: trying cpu inference to prevent VRAM spike
         # vae.to("cpu")
@@ -185,23 +185,64 @@ def plot_samples(
 
 
 def value_to_name(pa: dict[str, Tensor]) -> dict[str, list[str]]:
-    idx_to_name = dict(
-        dataset=["nan", "MIC", "REX", "CXP", "PAD", "NIH", "BRX", "VIN"],
-        view=["nan", "AP", "PA", "LATERAL"],
-        race=["nan", "Asian", "Black", "White"],
-        sex=["nan", "Male", "Female"],
-        disease=["nan", "N", "P"],
-    )
+    idx_to_name = {
+        "dataset": ["nan", "MIC", "REX", "CXP", "PAD", "NIH", "BRX", "VIN"],
+        "view": ["nan", "AP", "PA", "LATERAL"],
+        "race": ["nan", "Asian", "Black", "White"],
+        "sex": ["nan", "Male", "Female"],
+        "disease": ["nan", "N", "P"],
+        # Add dataset-specific mappings here if you want prettier labels:
+        # "density": ["nan", "A", "B", "C", "D"],
+        # "cview": [...],
+        # "scanner": [...],
+    }
+
     out = {k: [] for k in pa.keys()}
+
+    def _to_scalar(x: Tensor):
+        if x.numel() != 1:
+            raise ValueError(f"Expected scalar tensor, got shape {tuple(x.shape)}")
+        return x.item()
+
+    def _is_nan(x) -> bool:
+        return isinstance(x, float) and np.isnan(x)
+
     for k, v in pa.items():
         for i in range(v.shape[0]):  # batch size
+            val = _to_scalar(v[i])
+
             if k == "age":
-                age = "nan" if torch.isnan(v[i]) else str(int(v[i].item() * 100))
-                out[k].append(age)
-            elif k in ["dataset", "view", "race", "sex"]:
-                out[k].append(idx_to_name[k][v[i]])
-            else:  # applies to all diseases
-                out[k].append(idx_to_name["disease"][v[i]])
+                if _is_nan(val):
+                    out[k].append("nan")
+                else:
+                    out[k].append(str(int(round(float(val) * 100))))
+                continue
+
+            # Known categorical keys with explicit name maps
+            if k in idx_to_name:
+                if _is_nan(val):
+                    out[k].append("nan")
+                else:
+                    idx = int(round(float(val)))
+                    names = idx_to_name[k]
+                    if 0 <= idx < len(names):
+                        out[k].append(names[idx])
+                    else:
+                        out[k].append(str(idx))
+                continue
+
+            # Fallback for unknown keys:
+            # 1) If value looks like an integer class, show the integer.
+            # 2) Otherwise show a rounded float.
+            if _is_nan(val):
+                out[k].append("nan")
+            else:
+                fval = float(val)
+                if abs(fval - round(fval)) < 1e-6:
+                    out[k].append(str(int(round(fval))))
+                else:
+                    out[k].append(f"{fval:.3f}")
+
     return out
 
 
@@ -215,76 +256,88 @@ def plot_counterfactuals(
     file_path: str | None = None,
     **kwargs,
 ) -> None:
+    import numbers
+    import time
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
     from data_handle.datasets import CLASS_SCHEMA
 
     bs = x.shape[0]
     do_pa = {k: v.clone() for k, v in pa.items()}
-    do_i = []
-    pa_keys = list(pa)
-    pa_keys.remove("no_finding")
-    diseases = [
-        k for k in pa_keys if k not in ["dataset", "age", "race", "sex", "view"]
-    ]
-    # build batch of random interventions
+    do_i: list[str] = []
+    pa_keys = list(pa.keys())
+
+    if len(pa_keys) == 0:
+        raise ValueError("No parent keys found for counterfactual plotting.")
+
+    # Build batch of random interventions
     for i in range(bs):
-        # not_null = []
-        # for k in pa.keys():
-        #     if (pa[k][i] != 0) and (k != "no_finding"):  # NULL=0
-        #         not_null.append(k)
-        # k = np.random.choice(not_null)
         k = pa_keys[i % len(pa_keys)]  # wraps around
         do_i.append(k)
+
         y = do_pa[k][i].clone()
-        num_classes = CLASS_SCHEMA[k]
+        schema_val = CLASS_SCHEMA.get(k, None)
+        is_categorical = isinstance(schema_val, numbers.Integral)
 
-        if num_classes is not None:  # categorical
-            do_y = torch.randint(1, num_classes, y.shape, device=y.device)
-            while ((do_y == 0) | (do_y == y)).any():
-                do_y = torch.randint(1, num_classes, y.shape, device=y.device)
+        if is_categorical:
+            num_classes = int(schema_val)
+
+            # If there is no alternative class, keep original
+            if num_classes <= 1:
+                do_y = y.clone()
+            else:
+                # Sample from [0, num_classes)
+                do_y = torch.randint(0, num_classes, y.shape, device=y.device)
+
+                # Re-sample until it differs from the original label
+                max_tries = 32
+                tries = 0
+                while (do_y == y).any() and tries < max_tries:
+                    do_y = torch.randint(0, num_classes, y.shape, device=y.device)
+                    tries += 1
+
+                # Fallback in pathological cases
+                if (do_y == y).any():
+                    do_y = (y.long() + 1) % num_classes
+                    do_y = do_y.to(y.dtype)
+
             do_pa[k][i] = do_y
-
-            if k in diseases:
-                if do_y == 2:  # diseased
-                    do_pa["no_finding"][i] = torch.ones_like(do_y)  # negative
-                elif do_y == 1:  # healthy
-                    # check no other disease is positive
-                    no_finding = True
-                    for d in diseases:
-                        if do_pa[d][i] == 2:  # diseased
-                            no_finding = False
-                    if no_finding:
-                        do_pa["no_finding"][i] = 1 + torch.ones_like(do_y)  # positive
-        else:  # continuous
-            do_pa[k][i] = torch.rand_like(do_pa[k][i])  # age / 100
+        else:
+            # Continuous variable, e.g. normalized age
+            do_pa[k][i] = torch.rand_like(do_pa[k][i])
 
     sched_solver = steps is not None
     if sched_solver:
         kwargs = dict(
             method="euler",
-            t=model.schedule(torch.linspace(1.0, 0.0, steps), model.alpha),
+            t=model.schedule(torch.linspace(1.0, 0.0, steps, device=x.device), model.alpha),
         )
-    else:  # ODE solver kwargs already given, e.g. for dopri5
-        kwargs["t"] = torch.tensor([1.0, 0.0])
-    kwargs["t"] = kwargs["t"].to(x.device)
+    else:
+        kwargs["t"] = torch.tensor([1.0, 0.0], device=x.device)
+
     u = model.ode_solve(x, pa=pa, **kwargs)[-1]  # type: ignore
 
     if sched_solver:
-        kwargs["t"] = model.schedule(torch.linspace(0.0, 1.0, steps), model.alpha)
+        kwargs["t"] = model.schedule(torch.linspace(0.0, 1.0, steps, device=x.device), model.alpha)
     else:
-        kwargs["t"] = torch.tensor([0.0, 1.0])
-    kwargs["t"] = kwargs["t"].to(x.device)
+        kwargs["t"] = torch.tensor([0.0, 1.0], device=x.device)
+
     cf_x = model.ode_solve(u, pa=do_pa, **kwargs)[-1]  # type: ignore
 
     if isinstance(vae, torch.nn.Module):
         t0 = time.time()
-        # NOTE: trying cpu inference to prevent VRAM spike
-        # vae.to("cpu")
         vae_dev = next(vae.parameters()).device
         x, cf_x = x.to(vae_dev), cf_x.to(vae_dev)
         z = x * vae.std + vae.mean
         cf_z = cf_x * vae.std + vae.mean
-        with torch.autocast(z.device.type, dtype=torch.bfloat16):
+
+        if z.device.type == "cuda" and torch.cuda.is_bf16_supported():
+            with torch.autocast(z.device.type, dtype=torch.bfloat16):
+                out = vae.decode(torch.cat([z, cf_z], dim=0))
+        else:
             out = vae.decode(torch.cat([z, cf_z], dim=0))
+
         rec, cf_x = out.chunk(2, dim=0)
         x = (rec.float().clamp(min=-1, max=1) + 1) * 0.5  # [0,1]
 
@@ -295,30 +348,41 @@ def plot_counterfactuals(
     x, cf_x = x[:, 0, ...].cpu(), cf_x[:, 0, ...].cpu()  # (b, h, w)
     effect = (cf_x - x) * 255
     imgs = [x, cf_x, effect]
+
     _pa, _do_pa = value_to_name(pa), value_to_name(do_pa)
 
     fs = 20
     plt.rcParams["font.size"] = fs
-    c, s = 6, 8  # adjust as needed
-    nrows = 3 * (c * round(bs / c)) // c
+    c, s = 6, 8
+    nrows = 3 * int(np.ceil(bs / c))
     fig, axes = plt.subplots(nrows, c, figsize=(s * c, s * nrows + s))
+
+    if nrows == 1:
+        axes = np.array([axes])
+    axes = np.atleast_2d(axes)
 
     count = [0, 0, 0]
     for idx, ax in enumerate(axes.flatten()):
         row = idx // c
-        i = row % 3
+        img_group = row % 3
 
-        if count[i] < imgs[i].shape[0]:
-            k = do_i[count[i]]  # intervention key for batch element i
-            img = imgs[i][count[i]].squeeze()
-            if i == 0:  # observation
+        if count[img_group] < imgs[img_group].shape[0]:
+            sample_idx = count[img_group]
+            k = do_i[sample_idx]
+            img = imgs[img_group][sample_idx].squeeze()
+
+            if img_group == 0:  # observation
                 ax.imshow(img, cmap="gray")
-                ax.set_xlabel(f"{k}: {_pa[k][count[i]]}", labelpad=8)
-            if i == 1:  # counterfactual
+                ax.set_xlabel(f"{k}: {_pa[k][sample_idx]}", labelpad=8)
+
+            elif img_group == 1:  # counterfactual
                 ax.imshow(img, cmap="gray")
-                ax.set_xlabel(f"do({k}={_do_pa[k][count[i]]})", labelpad=8)
-            if i == 2:  # effect
-                amax = img.abs().max()
+                ax.set_xlabel(f"do({k}={_do_pa[k][sample_idx]})", labelpad=8)
+
+            else:  # effect
+                amax = float(img.abs().max())
+                if amax == 0:
+                    amax = 1.0
                 eff = ax.imshow(img, cmap="RdBu_r", vmin=-amax, vmax=amax)
                 divider = make_axes_locatable(ax)
                 cax = divider.append_axes("bottom", size="3%", pad=0.08)
@@ -327,11 +391,14 @@ def plot_counterfactuals(
                 cbar.ax.tick_params(labelsize=fs // 2)
                 ticks = np.linspace(np.ceil(-amax), np.floor(amax), 5)
                 cbar.set_ticks(np.round(ticks))
-            count[i] += 1
+
+            count[img_group] += 1
+
         ax.set_xticks([])
         ax.set_yticks([])
         for spine in ax.spines.values():
             spine.set_visible(False)
+
     fig.subplots_adjust(wspace=0.055, hspace=0.01)
     if file_path is not None:
         plt.savefig(file_path, dpi=300, bbox_inches="tight")

@@ -29,6 +29,8 @@ class PerAttrCondEmbedder(nn.Module):
 
         for key in self.parents:
             in_dim = self.parent_dims[key]
+            print(f"Creating embedder for parent '{key}' with input dim {in_dim} "
+                  f"and output dim {self.parent_embed_dim}")
             self.embeddings[key] = nn.Sequential(
                 nn.Linear(in_dim, self.parent_embed_dim),
                 nn.SiLU(),

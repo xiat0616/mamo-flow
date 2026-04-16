@@ -1,7 +1,6 @@
 import argparse
 import os
 import time
-from dataclasses import fields
 
 import torch
 import torch.distributed as dist
@@ -57,7 +56,7 @@ class Trainer:
         scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
         ema: ModelEMA | None = None,
         vae: nn.Module | None = None,
-        amp_dtype: torch.dtype = torch.bfloat16,
+        amp_dtype: torch.dtype | None = None,
     ):
         self.model = model
         self.args = args
@@ -71,7 +70,7 @@ class Trainer:
         self.rank = dist.get_rank() if self.is_dist else 0
         self.step, self.epoch = 0, 0
         self.best_loss = 1e6
-        self.eval_mc = 16
+        self.eval_mc = 2
         self.tqdm_kwargs = dict(
             disable=(self.rank != 0),
             mininterval=float(os.environ.get("TQDM_MININTERVAL", 1)),
@@ -95,8 +94,12 @@ class Trainer:
                 x = (x + (torch.rand_like(x) - 0.5) / 255.0).clamp(0, 1) * 2 - 1
 
             self.model.zero_grad(set_to_none=True)
-            with torch.autocast(x.device.type, dtype=self.amp_dtype):
+            if self.amp_dtype is not None:
+                with torch.autocast(x.device.type, dtype=self.amp_dtype):
+                    loss = self.model(x, pa)
+            else:
                 loss = self.model(x, pa)
+
             loss.backward()
             stats = dict(gnorm=nn.utils.clip_grad_norm_(self.model.parameters(), 1.0))
             self.optimizer.step()
@@ -141,7 +144,7 @@ class Trainer:
                     wandb.log(mc_stats | {"valid_mc": self.eval_mc}, self.step)
                     self.save_checkpoint(mc_stats["valid_loss"])
                     save_plots(
-                        batch_size=bs * 2,  # NOTE: maybe decrease
+                        batch_size=bs,  # NOTE: maybe decrease
                         dataset=dataloaders["valid"].dataset,
                         model=self.model,
                         vae=self.vae,
@@ -179,7 +182,10 @@ class Trainer:
             x = x.float().to(self.device, non_blocking=True)
             x = x * 2 - 1 if channels <= 3 else x  # [-1,1] if image
             pa = {k: v.to(self.device, non_blocking=True) for k, v in pa.items()}
-            with torch.autocast(x.device.type, dtype=self.amp_dtype):
+            if self.amp_dtype is not None:
+                with torch.autocast(x.device.type, dtype=self.amp_dtype):
+                    loss = self.model(x, pa, g)
+            else:
                 loss = self.model(x, pa, g)
             n += bs
             total_loss += loss.detach() * bs
@@ -307,7 +313,10 @@ if __name__ == "__main__":
     )
     is_dist = args.dist and dist.is_available() and dist.is_initialized()
 
-    amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    if torch.cuda.get_device_capability(device)[0] >= 7:
+        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    else:
+        amp_dtype = None  # old GPUs (sm_61) don't support fp16 for all ops
 
     seed_all(args.seed, args.determ)
     if args.resume:
@@ -411,6 +420,7 @@ if __name__ == "__main__":
             sigma=args.sigma,
             alpha=args.alpha,
             p_uncond=args.p_uncond,
+            amp_dtype=amp_dtype,
         )
     elif args.model == "transformer":
         raise NotImplementedError("Transformer model not implemented yet")
@@ -427,7 +437,12 @@ if __name__ == "__main__":
 
     if is_dist:
         model = DistributedDataParallel(model, device_ids=[device], bucket_cap_mb=150)
-    model = torch.compile(model)
+    # Some GPUs on our server is too old to support torch.compile, so we check the capability before compiling    
+    if torch.cuda.get_device_capability(device)[0] >= 7:
+        model = torch.compile(model)
+    else:
+        print(f"Skipping torch.compile: device {device} has CUDA capability "
+              f"{torch.cuda.get_device_capability(device)}, requires >= 7.0")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),

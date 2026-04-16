@@ -8,13 +8,13 @@ base_name="${1:-flow}"
 img_height=256
 img_width=192
 cond_embedder="per_attr"
-model_channels=64
+model_channels=32
 p_uncond=0.2
 
 # optional: other useful vars
 img_channels=1
 epochs=10000
-bs=192
+bs=24
 lr=1e-4
 
 exp_name="${base_name}_flow_embed_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
@@ -25,8 +25,8 @@ mkdir -p "../checkpoints/$exp_name"   # must be unique
 ARGS=(
 # DATA
     --data_dir="/vol/biodata/data/Mammo/EMBED/pngs/1024x768"
-    --csv_filepath="./assets/EMBED_meta.csv"
-    --save_dir="../checkpoints/$exp_name"
+    --csv_filepath="/vol/biomedic3/tx1215/mamo-flow/assets/EMBED_meta.csv"
+    --save_dir="./checkpoints/$exp_name"
     --parents age view density scanner cview
     --exclude_cviews=1
     --hold_out_model_5=1
@@ -65,7 +65,7 @@ ARGS=(
 # MODEL
     unet
     --model_channels=$model_channels
-    --channel_mult 1 2 3 4
+    --channel_mult 1 2 3 4 5
     --cond_embed_dim=160
     --num_blocks=3
     --attn_resolutions 16x12
@@ -106,7 +106,7 @@ cd /vol/biomedic3/tx1215/mamo-flow
 uv sync --frozen
 
 nvidia-smi
-export OMP_NUM_THREADS=4
+export OMP_NUM_THREADS=3
 export TQDM_MININTERVAL=300
 export MASTER_ADDR=\$(scontrol show hostnames "\$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=\$(shuf -i 10001-29500 -n 1)  # select random port in range
@@ -120,9 +120,9 @@ srun uv run torchrun \
     ./src/train_flow.py ${ARGS[@]} 2>&1 | tee "./checkpoints/$exp_name/log.out"
 EOF
 else
-    NPROC_PER_NODE=1
+    NPROC_PER_NODE=8
     RDZV_ID="${RDZV_ID:-$(date +%s)-$$}"
-    export OMP_NUM_THREADS=2
+    export OMP_NUM_THREADS=1
     export TQDM_MININTERVAL=300
     export MASTER_ADDR=localhost
     export MASTER_PORT=$(shuf -i 10001-29500 -n 1)

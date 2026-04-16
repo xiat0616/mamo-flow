@@ -37,6 +37,8 @@ class UNetConfig:
     label_balance: float
     concat_balance: float
 
+amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
 class Flow(nn.Module):
     def __init__(
         self,
@@ -45,6 +47,7 @@ class Flow(nn.Module):
         sigma: float = 0.0,
         alpha: float = 1.0,
         p_uncond: float = 0.2,
+        amp_dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.forward_nn = forward_nn
@@ -52,6 +55,7 @@ class Flow(nn.Module):
         self.sigma = sigma
         self.alpha = alpha
         self.p_uncond = p_uncond
+        self.amp_dtype = amp_dtype
 
     def forward(
         self,
@@ -59,8 +63,14 @@ class Flow(nn.Module):
         pa: dict[str, Tensor] | None = None,
         g: torch.Generator | None = None,
     ) -> Tensor:
-        u = torch.randn_like(x, generator=g)
-        t = torch.rand(x.shape[0], device=x.device, generator=g)
+        
+        if g is None:
+            u = torch.randn_like(x)
+            t = torch.rand(x.shape[0], device=x.device)
+        else:
+            u = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=g)
+            t = torch.rand(x.shape[0], device=x.device, generator=g)
+            
         t = self.schedule(t, self.alpha)
         x_t = self.interpolant(u, x, t, self.sigma)
 
@@ -145,13 +155,21 @@ class Flow(nn.Module):
             sample_args = SampleConfig()
 
         def func(t: Tensor, y: Tensor) -> Tensor:
-            with torch.autocast(y.device.type, dtype=torch.bfloat16):
+            if self.amp_dtype is None:
                 dydt = self.guided_vector_field(
                     y,
                     t,
                     pa=pa,
                     sample_args=sample_args,
                 )
+            else:
+                with torch.autocast(y.device.type, dtype=self.amp_dtype):
+                    dydt = self.guided_vector_field(
+                        y,
+                        t,
+                        pa=pa,
+                        sample_args=sample_args,
+                    )
             return dydt.float()
 
         return odeint(func, x, **kwargs)

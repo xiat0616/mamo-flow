@@ -396,7 +396,7 @@ class EMBED(torch.utils.data.Dataset):
         if self.transform is not None:
             image = self.transform(image)
 
-        pa = {k: metadata[k] for k in self.parents}
+        pa = {k: torch.as_tensor(metadata[k], dtype=torch.float32).unsqueeze(0) for k in self.parents}
 
         return dict(
             x=image,
