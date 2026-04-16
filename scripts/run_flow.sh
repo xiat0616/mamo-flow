@@ -12,7 +12,7 @@ p_uncond=0.2
 # optional: other useful vars
 img_channels=1
 epochs=10000
-bs=32
+bs=16
 lr=1e-4
 
 exp_name="${base_name}_flow_embed_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
@@ -96,7 +96,7 @@ if [ "$2" = "gpus48" ]; then
 #!/bin/bash
 #SBATCH --partition=gpus48
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
-#SBATCH --exclude=loki
+#SBATCH --nodelist=loki
 #SBATCH --output=../checkpoints/$exp_name/slurm.%j.log
 
 cd /vol/biomedic3/tx1215/mamo-flow
@@ -104,7 +104,7 @@ uv sync --frozen
 
 nvidia-smi
 export OMP_NUM_THREADS=${NPROC_PER_NODE}
-export TQDM_MININTERVAL=10
+export TQDM_MININTERVAL=300
 export MASTER_ADDR=\$(scontrol show hostnames "\$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=\$(shuf -i 10001-29500 -n 1)
 
@@ -129,7 +129,7 @@ uv sync --frozen
 
 nvidia-smi
 export OMP_NUM_THREADS=3
-export TQDM_MININTERVAL=300
+export TQDM_MININTERVAL=10
 export MASTER_ADDR=\$(scontrol show hostnames "\$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=\$(shuf -i 10001-29500 -n 1)
 

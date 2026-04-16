@@ -70,7 +70,7 @@ class Trainer:
         self.rank = dist.get_rank() if self.is_dist else 0
         self.step, self.epoch = 0, 0
         self.best_loss = 1e6
-        self.eval_mc = 2
+        self.eval_mc = 8
         self.tqdm_kwargs = dict(
             disable=(self.rank != 0),
             mininterval=float(os.environ.get("TQDM_MININTERVAL", 1)),
@@ -447,8 +447,7 @@ if __name__ == "__main__":
     else:
         print(f"Skipping torch.compile: device {device} has CUDA capability "
                 f"{torch.cuda.get_device_capability(device)}, requires >= 7.0")
-
-
+  
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
