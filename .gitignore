@@ -12,3 +12,4 @@ scripts/.python-version
 wandb
 tea_debug.log
 requirements_gpu24.txt
+_legacy
