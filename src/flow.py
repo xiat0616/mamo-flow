@@ -64,10 +64,6 @@ class Flow(nn.Module):
         g: torch.Generator | None = None,
     ) -> Tensor:
         
-        # if g is None:
-        #     u = torch.randn_like(x)
-        #     t = torch.rand(x.shape[0], device=x.device)
-        # else:
         u = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=g)
         t = torch.rand(x.shape[0], device=x.device, generator=g)
 

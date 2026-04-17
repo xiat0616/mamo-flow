@@ -3,8 +3,8 @@
 base_name="${1:-flow}"
 
 # ----------------------------
-img_height=512
-img_width=384
+img_height=256
+img_width=192
 cond_embedder="per_attr"
 model_channels=64
 p_uncond=0.2
@@ -12,7 +12,7 @@ p_uncond=0.2
 # optional: other useful vars
 img_channels=1
 epochs=10000
-bs=16
+bs=48
 lr=1e-4
 
 exp_name="${base_name}_flow_embed_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
@@ -48,7 +48,7 @@ ARGS=(
     --betas 0.9 0.999
     --eps=1e-8
     --ema_rate=0.9999
-    --eval_freq=5
+    --eval_freq=5000
     --num_workers=8
     --prefetch_factor=4
     --dist
@@ -63,7 +63,7 @@ ARGS=(
 # MODEL
     unet
     --model_channels=$model_channels
-    --channel_mult 1 1 2 2 4 4
+    --channel_mult 1 2 3 4 5
     --cond_embed_dim=160
     --num_blocks=3
     --attn_resolutions 16x12
@@ -94,9 +94,10 @@ NPROC_PER_NODE=2
 if [ "$2" = "gpus48" ]; then
     sbatch <<EOF
 #!/bin/bash
+source ~/.bashrc
 #SBATCH --partition=gpus48
+#SBATCH --nodelist=mira01
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
-#SBATCH --nodelist=loki
 #SBATCH --output=../checkpoints/$exp_name/slurm.%j.log
 
 cd /vol/biomedic3/tx1215/mamo-flow
