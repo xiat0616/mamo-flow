@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.func import jvp
+from torchdiffeq import odeint
 from dataclasses import dataclass
 
 
@@ -50,9 +51,6 @@ class UNetConfig:
     concat_balance: float
 
 
-amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-
-
 class MeanFlow(nn.Module):
     """MeanFlow: one-step generative modelling via average velocity fields.
 
@@ -81,7 +79,7 @@ class MeanFlow(nn.Module):
         self.cond_embedder = cond_embedder
         self.p_uncond = p_uncond
         self.amp_dtype = amp_dtype
-        self.cfg = mf_config or MeanFlowConfig()
+        self.mf_config = mf_config or MeanFlowConfig()
 
     # ------------------------------------------------------------------
     # Time sampling  (Sec 4.3, Tab 1d)
@@ -90,13 +88,13 @@ class MeanFlow(nn.Module):
         self, batch_size: int, device: torch.device, g: torch.Generator | None = None
     ) -> tuple[Tensor, Tensor]:
         """Sample (r, t) pairs according to the configured distribution."""
-        if self.cfg.time_sampler == "uniform":
+        if self.mf_config.time_sampler == "uniform":
             raw = torch.rand(batch_size, 2, device=device, generator=g)
-        elif self.cfg.time_sampler == "lognorm":
+        elif self.mf_config.time_sampler == "lognorm":
             normal = torch.randn(batch_size, 2, device=device, generator=g)
-            raw = torch.sigmoid(normal * self.cfg.lognorm_sigma + self.cfg.lognorm_mu)
+            raw = torch.sigmoid(normal * self.mf_config.lognorm_sigma + self.mf_config.lognorm_mu)
         else:
-            raise ValueError(f"Unknown time_sampler: {self.cfg.time_sampler}")
+            raise ValueError(f"Unknown time_sampler: {self.mf_config.time_sampler}")
 
         # enforce t >= r by sorting
         sorted_raw, _ = torch.sort(raw, dim=1)
@@ -104,8 +102,8 @@ class MeanFlow(nn.Module):
         t = sorted_raw[:, 1]
 
         # With probability (1 - ratio_r_neq_t), collapse r = t (pure FM signal)
-        if self.cfg.ratio_r_neq_t < 1.0:
-            fraction_equal = 1.0 - self.cfg.ratio_r_neq_t
+        if self.mf_config.ratio_r_neq_t < 1.0:
+            fraction_equal = 1.0 - self.mf_config.ratio_r_neq_t
             eq_mask = torch.rand(batch_size, device=device, generator=g) < fraction_equal
             r = torch.where(eq_mask, t, r)
 
@@ -197,9 +195,9 @@ class MeanFlow(nn.Module):
         error = u - u_tgt.detach()
         sq_err = (error ** 2).flatten(1).sum(1)
 
-        p = self.cfg.adaptive_weight_p
+        p = self.mf_config.adaptive_weight_p
         if p > 0:
-            weight = 1.0 / (sq_err.detach() + self.cfg.adaptive_weight_eps) ** p
+            weight = 1.0 / (sq_err.detach() + self.mf_config.adaptive_weight_eps) ** p
         else:
             weight = torch.ones_like(sq_err)
 
@@ -264,8 +262,7 @@ class MeanFlow(nn.Module):
         Note: with standard CFG each step costs 2-NFE (cond + uncond).
         """
         B, device = noise.shape[0], noise.device
-        # Linear schedule; can be replaced with custom schedules if desired
-        ts = torch.linspace(1.0, 0.0, steps + 1, device=device) 
+        ts = torch.linspace(1.0, 0.0, steps + 1, device=device)
 
         z = noise
         for i in range(steps):
@@ -277,3 +274,34 @@ class MeanFlow(nn.Module):
             z = z - (t_val - r_val) * u
 
         return z
+
+    # ------------------------------------------------------------------
+    # ODE solve  (uses r=t instantaneous velocity with a standard solver)
+    # ------------------------------------------------------------------
+    @torch.inference_mode()
+    def ode_solve(
+        self,
+        x: Tensor,
+        pa: dict[str, Tensor] | None = None,
+        sample_args: SampleConfig | None = None,
+        **kwargs,
+    ) -> Tensor:
+        """Solve dz/dt = v(z,t) using r=t (instantaneous velocity).
+
+        Caller controls direction and time points via kwargs,
+        e.g. t=torch.tensor([0.0, 1.0]) for inversion,
+             t=torch.tensor([1.0, 0.0]) for generation.
+        """
+        if sample_args is None:
+            sample_args = SampleConfig()
+
+        cond_emb = self._get_cond_emb(pa, null_keys=sample_args.null_keys)
+
+        def func(t: Tensor, y: Tensor) -> Tensor:
+            B = y.shape[0]
+            t_batch = t.expand(B) if t.ndim == 0 else t
+            return self._net_call(y, t_batch, t_batch, cond_emb)
+
+        return odeint(func, x, **kwargs)
+
+    

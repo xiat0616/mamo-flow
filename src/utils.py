@@ -427,6 +427,212 @@ def save_plots(
 
 
 @torch.inference_mode()
+def plot_samples_mf(
+    noise: Tensor,
+    pa: dict[str, Tensor],
+    model: torch.nn.Module,
+    vae: torch.nn.Module | None = None,
+    steps: int = 1,
+    file_path: str | None = None,
+) -> None:
+    x = model.sample(noise, steps=steps, pa=pa)
+    if isinstance(vae, torch.nn.Module):
+        vae_dev = next(vae.parameters()).device
+        x = x.to(vae_dev)
+        z = x * vae.std + vae.mean
+        with torch.autocast(z.device.type, dtype=torch.bfloat16):
+            x = vae.decode(z)
+    x = (x.float().clamp(-1, 1) + 1) * 0.5
+    c, s = noise.shape[0], 8
+    plt.figure(figsize=(c * s, s * c // 6))
+    plt.axis("off")
+    plt.imshow(make_grid(x.cpu(), padding=0, nrow=6).permute(1, 2, 0))
+    plt.tight_layout()
+    if file_path is not None:
+        plt.savefig(file_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+@torch.inference_mode()
+def plot_counterfactuals_mf(
+    x: Tensor,
+    pa: dict[str, Tensor],
+    model: torch.nn.Module,
+    vae: torch.nn.Module | None = None,
+    steps: int = 1,                  # MeanFlow sampling steps
+    file_path: str | None = None,
+    **kwargs,
+) -> None:
+    bs = x.shape[0]
+    do_pa = {k: v.clone() for k, v in pa.items()}
+    do_i: list[str] = []
+    pa_keys = list(pa.keys())
+
+    if len(pa_keys) == 0:
+        raise ValueError("No parent keys found for counterfactual plotting.")
+
+    for i in range(bs):
+        k = pa_keys[i % len(pa_keys)]
+        do_i.append(k)
+        y = do_pa[k][i].clone()
+        schema_val = CLASS_SCHEMA.get(k, None)
+        is_categorical = isinstance(schema_val, numbers.Integral)
+
+        if is_categorical:
+            num_classes = int(schema_val)
+            if num_classes <= 1:
+                do_y = y.clone()
+            else:
+                do_y = torch.randint(0, num_classes, y.shape, device=y.device)
+                max_tries = 32
+                tries = 0
+                while (do_y == y).any() and tries < max_tries:
+                    do_y = torch.randint(0, num_classes, y.shape, device=y.device)
+                    tries += 1
+                if (do_y == y).any():
+                    do_y = (y.long() + 1) % num_classes
+                    do_y = do_y.to(y.dtype)
+            do_pa[k][i] = do_y
+        else:
+            do_pa[k][i] = torch.rand_like(do_pa[k][i])
+
+    # Separate MeanFlow sample args from ODE kwargs
+    inv_sample_args = kwargs.pop("inv_sample_args", None)
+    gen_sample_args = kwargs.pop("gen_sample_args", None)
+
+    # Use a separate inversion step count if provided; otherwise default to 150
+    inv_steps = kwargs.pop("inv_steps", 150)
+
+    # Remaining kwargs go to model.ode_solve(..., **ode_kwargs)
+    ode_kwargs = dict(kwargs)
+
+    sched_solver = inv_steps is not None
+    if sched_solver:
+        ode_kwargs.setdefault("method", "euler")
+        ode_kwargs.setdefault(
+            "t",
+            torch.linspace(0.0, 1.0, inv_steps, device=x.device),
+        )
+    else:
+        ode_kwargs.setdefault("t", torch.tensor([0.0, 1.0], device=x.device))
+
+    # Encode data -> noise via ODE inversion on the diagonal field r=t
+    noise = model.ode_solve(
+        x,
+        pa=pa,
+        sample_args=inv_sample_args,
+        **ode_kwargs,
+    )[-1]
+
+    # Generate CF from the same recovered noise using native MeanFlow sampling
+    cf_x = model.sample(
+        noise,
+        steps=steps,
+        pa=do_pa,
+        sample_args=gen_sample_args,
+    )
+
+    if isinstance(vae, torch.nn.Module):
+        t0 = time.time()
+        vae_dev = next(vae.parameters()).device
+        x = x.to(vae_dev)
+        cf_x = cf_x.to(vae_dev)
+
+        z = x * vae.std + vae.mean
+        cf_z = cf_x * vae.std + vae.mean
+
+        if z.device.type == "cuda" and torch.cuda.is_bf16_supported():
+            with torch.autocast(z.device.type, dtype=torch.bfloat16):
+                out = vae.decode(torch.cat([z, cf_z], dim=0))
+        else:
+            out = vae.decode(torch.cat([z, cf_z], dim=0))
+
+        rec, cf_x = out.chunk(2, dim=0)
+        x = (rec.float().clamp(min=-1, max=1) + 1) * 0.5
+        print(f"VAE inference time elapsed: {time.time() - t0:.2f}s")
+
+    cf_x = (cf_x.float().clamp(min=-1, max=1) + 1) * 0.5
+    x = x[:, 0, ...].cpu()
+    cf_x = cf_x[:, 0, ...].cpu()
+    effect = (cf_x - x) * 255
+    imgs = [x, cf_x, effect]
+
+    _pa, _do_pa = value_to_name(pa), value_to_name(do_pa)
+
+    fs = 20
+    plt.rcParams["font.size"] = fs
+    c, s = 6, 8
+    nrows = 3 * int(np.ceil(bs / c))
+    fig, axes = plt.subplots(nrows, c, figsize=(s * c, s * nrows + s))
+
+    if nrows == 1:
+        axes = np.array([axes])
+    axes = np.atleast_2d(axes)
+
+    count = [0, 0, 0]
+    for idx, ax in enumerate(axes.flatten()):
+        row = idx // c
+        img_group = row % 3
+
+        if count[img_group] < imgs[img_group].shape[0]:
+            sample_idx = count[img_group]
+            k = do_i[sample_idx]
+            img = imgs[img_group][sample_idx].squeeze()
+
+            if img_group == 0:
+                ax.imshow(img, cmap="gray")
+                ax.set_xlabel(f"{k}: {_pa[k][sample_idx]}", labelpad=8)
+
+            elif img_group == 1:
+                ax.imshow(img, cmap="gray")
+                ax.set_xlabel(f"do({k}={_do_pa[k][sample_idx]})", labelpad=8)
+
+            else:
+                amax = float(img.abs().max())
+                if amax == 0:
+                    amax = 1.0
+                eff = ax.imshow(img, cmap="RdBu_r", vmin=-amax, vmax=amax)
+                divider = make_axes_locatable(ax)
+                cax = divider.append_axes("bottom", size="3%", pad=0.08)
+                cbar = fig.colorbar(eff, cax=cax, orientation="horizontal")
+                cbar.outline.set_visible(False)
+                cbar.ax.tick_params(labelsize=fs // 2)
+                ticks = np.linspace(np.ceil(-amax), np.floor(amax), 5)
+                cbar.set_ticks(np.round(ticks))
+
+            count[img_group] += 1
+
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+    fig.subplots_adjust(wspace=0.055, hspace=0.01)
+    if file_path is not None:
+        plt.savefig(file_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    
+@torch.inference_mode()
+def save_plots_mf(
+    batch_size: int,
+    dataset: torch.utils.data.Dataset,
+    model: torch.nn.Module,
+    steps: int,
+    save_path: str,
+    vae: torch.nn.Module | None = None,
+) -> None:
+    base = unwrap(model)
+    device = next(base.parameters()).device
+    num_samples = min(6 * round(batch_size / 6), 12)
+    dataloader = torch.utils.data.DataLoader(dataset, num_samples, shuffle=True)
+    batch = next(iter(dataloader))
+    x = batch["x"].float().to(device) * 2 - 1
+    pa = {k: v.to(device) for k, v in batch["pa"].items()}
+    plot_samples_mf(torch.randn_like(x), pa=pa, model=base, vae=vae, steps=steps, file_path=save_path + ".pdf")
+    plot_counterfactuals_mf(x, pa=pa, model=base, vae=vae, steps=steps, file_path=save_path + "_cf.pdf")
+
+
+@torch.inference_mode()
 def save_reconstructions(
     batch_size: int,
     dataset: torch.utils.data.Dataset,
