@@ -143,17 +143,10 @@ class MeanFlow(nn.Module):
     ) -> Tensor:
         """Compute the MeanFlow training loss (Eq 9).
 
-        Standard training with label dropout for CFG support.
-        No guidance is baked into the target — CFG is applied at
-        inference time, giving full control over the guidance scale.
-
-        Args:
-            x:  clean data batch, shape (B, *).
-            pa: conditioning dict passed to ``cond_embedder``.
-            g:  optional torch Generator for reproducibility.
-
-        Returns:
-            Scalar loss.
+        Memory-lean version:
+        - compute u with a normal forward pass
+        - compute dudt only for the detached target via JVP
+        - do NOT backprop through the JVP target branch
         """
         B, device = x.shape[0], x.device
 
@@ -173,10 +166,18 @@ class MeanFlow(nn.Module):
         if self.cond_embedder is not None and pa is not None:
             cond_emb = self.cond_embedder(pa)
             if self.training and self.p_uncond > 0:
-                keep = (torch.rand(B, device=device) > self.p_uncond).to(cond_emb.dtype)
+                keep = (torch.rand(B, device=device, generator=g) > self.p_uncond).to(cond_emb.dtype)
                 cond_emb = cond_emb * keep[:, None]
 
-        # --- JVP to get u and du/dt  (Eq 8, Alg 1) ------------------------------
+        # Normalize MPConv weights before any JVP transform.
+        if self.training and hasattr(self.forward_nn, "normalize_weights"):
+            self.forward_nn.normalize_weights()
+        
+        # We trade computation for memory here by doing a separate forward pass for the JVP target branch.
+        # --- ordinary forward for prediction branch -------------------------------
+        u = self._net_call(z_t, r, t, cond_emb)
+
+        # --- JVP only for detached target branch ---------------------------------
         def _fn(z_: Tensor, r_: Tensor, t_: Tensor) -> Tensor:
             return self._net_call(z_, r_, t_, cond_emb)
 
@@ -185,14 +186,16 @@ class MeanFlow(nn.Module):
             torch.zeros_like(r),
             torch.ones_like(t),
         )
-        u, dudt = jvp(_fn, (z_t, r, t), tangents)
 
-        # --- build target  (Eq 11) -----------------------------------------------
-        dt = (t - r).reshape(-1, *([1] * (u.dim() - 1)))
-        u_tgt = v_cond - dt * dudt
+        # no_grad is okay here: it disables reverse-mode graph construction,
+        # but still allows forward-mode AD used by torch.func.jvp.
+        with torch.no_grad():
+            _, dudt = jvp(_fn, (z_t, r, t), tangents)
+            dt = (t - r).reshape(-1, *([1] * (u.dim() - 1)))
+            u_tgt = v_cond - dt * dudt
 
-        # --- loss  (Eq 9 + adaptive weighting, Appendix B.2) --------------------
-        error = u - u_tgt.detach()
+        # --- loss  (Eq 9 + adaptive weighting, Appendix B.2) ---------------------
+        error = u - u_tgt
         sq_err = (error ** 2).flatten(1).sum(1)
 
         p = self.mf_config.adaptive_weight_p

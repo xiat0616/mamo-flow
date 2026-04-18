@@ -118,9 +118,9 @@ class MPConv(torch.nn.Module):
 
     def forward(self, x, gain=1):
         w = self.weight.to(torch.float32)
-        if self.training:
-            with torch.no_grad():
-                self.weight.copy_(normalize(w))
+        # if self.training:
+        #     with torch.no_grad():
+        #         self.weight.copy_(normalize(w)) # forced weight normalization
         w = normalize(w)
         w = w * (gain / np.sqrt(w[0].numel()))
         w = w.to(x.dtype)
@@ -315,6 +315,12 @@ class UNet(torch.nn.Module):
                 )
 
         self.out_conv = MPConv(cout, img_channels, kernel=[3, 3])
+
+    @torch.no_grad()
+    def normalize_weights(self):
+        for m in self.modules():
+            if isinstance(m, MPConv):
+                m.weight.copy_(normalize(m.weight.float()))
 
     def forward(self, x, r, t, cond_emb):
         """

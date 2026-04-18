@@ -10,12 +10,12 @@ img_width=192
 img_channels=1
 
 cond_embedder="per_attr"
-model_channels=32
+model_channels=64
 cond_embed_dim=160
 p_uncond=0.2
 
 epochs=10000
-bs=48
+bs=32
 lr=1e-4
 
 # ----------------------------
@@ -63,7 +63,7 @@ ARGS=(
     --betas 0.9 0.999
     --eps=1e-8
     --ema_rate=0.9999
-    --eval_freq=5000
+    --eval_freq=10
     --num_workers=8
     --prefetch_factor=4
     --dist
@@ -113,7 +113,7 @@ source ~/.bashrc
 
 nvidia-smi
 export OMP_NUM_THREADS=${NPROC_PER_NODE}
-export TQDM_MININTERVAL=300
+export TQDM_MININTERVAL=10
 export MASTER_ADDR=\$(scontrol show hostnames "\$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=\$(shuf -i 10001-29500 -n 1)
 

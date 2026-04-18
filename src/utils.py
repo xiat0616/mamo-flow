@@ -164,7 +164,7 @@ def plot_samples(
             method="euler",
             t=model.schedule(torch.linspace(0.0, 1.0, steps).to(u.device), model.alpha),
         )
-    x = model.ode_solve(x=u, pa=pa, **kwargs)[-1]  # type: ignore
+    x = model.ode_solve(x=u, pa=pa, **kwargs)[-1]  # [-1,1]; type: ignore
     if isinstance(vae, torch.nn.Module):
         # NOTE: trying cpu inference to prevent VRAM spike
         # vae.to("cpu")
@@ -316,14 +316,14 @@ def plot_counterfactuals(
     else:
         kwargs["t"] = torch.tensor([1.0, 0.0], device=x.device)
 
-    u = model.ode_solve(x, pa=pa, **kwargs)[-1]  # type: ignore
+    u = model.ode_solve(x, pa=pa, **kwargs)[-1]  # [-1,1]; type: ignore 
 
     if sched_solver:
         kwargs["t"] = model.schedule(torch.linspace(0.0, 1.0, steps, device=x.device), model.alpha)
     else:
         kwargs["t"] = torch.tensor([0.0, 1.0], device=x.device)
 
-    cf_x = model.ode_solve(u, pa=do_pa, **kwargs)[-1]  # type: ignore
+    cf_x = model.ode_solve(u, pa=do_pa, **kwargs)[-1]  # [-1,1]; type: ignore
 
     if isinstance(vae, torch.nn.Module):
         t0 = time.time()
@@ -339,12 +339,15 @@ def plot_counterfactuals(
             out = vae.decode(torch.cat([z, cf_z], dim=0))
 
         rec, cf_x = out.chunk(2, dim=0)
-        x = (rec.float().clamp(min=-1, max=1) + 1) * 0.5  # [0,1]
+        x = (rec.float().clamp(min=-1, max=1) + 1) * 0.5 # [0,1]
+        cf_x = (cf_x.float().clamp(min=-1, max=1) + 1) * 0.5 # [0,1]
 
         eval_elapsed = time.time() - t0
         print(f"VAE inference time elapsed: {eval_elapsed:.2f}s")
+    else:
+        x = (x.float().clamp(min=-1, max=1) + 1) * 0.5 # [0,1]
+        cf_x = (cf_x.float().clamp(min=-1, max=1) + 1) * 0.5 # [0,1]
 
-    cf_x = (cf_x.float().clamp(min=-1, max=1) + 1) * 0.5  # [0,1]
     x, cf_x = x[:, 0, ...].cpu(), cf_x[:, 0, ...].cpu()  # (b, h, w)
     effect = (cf_x - x) * 255
     imgs = [x, cf_x, effect]
@@ -419,11 +422,11 @@ def save_plots(
     num_samples = min(6 * round(batch_size / 6), 12)
     dataloader = torch.utils.data.DataLoader(dataset, num_samples, shuffle=True)
     batch = next(iter(dataloader))
-    batch["x"] = batch["x"].float().to(device)
+    x = batch["x"].float().to(device) * 2 - 1
     pa = {k: v.to(device) for k, v in batch["pa"].items()}
     kwargs = dict(pa=pa, model=base, vae=vae, steps=steps)
-    plot_samples(torch.randn_like(batch["x"]), file_path=save_path + ".pdf", **kwargs)
-    plot_counterfactuals(batch["x"], file_path=save_path + "_cf.pdf", **kwargs)
+    plot_samples(torch.randn_like(x), file_path=save_path + ".pdf", **kwargs)
+    plot_counterfactuals(x, file_path=save_path + "_cf.pdf", **kwargs)
 
 
 @torch.inference_mode()
@@ -463,6 +466,10 @@ def plot_counterfactuals_mf(
     file_path: str | None = None,
     **kwargs,
 ) -> None:
+    import numbers
+    import time
+    from data_handle.datasets import CLASS_SCHEMA
+
     bs = x.shape[0]
     do_pa = {k: v.clone() for k, v in pa.items()}
     do_i: list[str] = []
@@ -549,9 +556,12 @@ def plot_counterfactuals_mf(
 
         rec, cf_x = out.chunk(2, dim=0)
         x = (rec.float().clamp(min=-1, max=1) + 1) * 0.5
+        cf_x = (cf_x.float().clamp(min=-1, max=1) + 1) * 0.5
         print(f"VAE inference time elapsed: {time.time() - t0:.2f}s")
+    else:
+        x = (x.float().clamp(min=-1, max=1) + 1) * 0.5
+        cf_x = (cf_x.float().clamp(min=-1, max=1) + 1) * 0.5
 
-    cf_x = (cf_x.float().clamp(min=-1, max=1) + 1) * 0.5
     x = x[:, 0, ...].cpu()
     cf_x = cf_x[:, 0, ...].cpu()
     effect = (cf_x - x) * 255
@@ -626,7 +636,7 @@ def save_plots_mf(
     num_samples = min(6 * round(batch_size / 6), 12)
     dataloader = torch.utils.data.DataLoader(dataset, num_samples, shuffle=True)
     batch = next(iter(dataloader))
-    x = batch["x"].float().to(device) * 2 - 1
+    x = batch["x"].float().to(device) * 2 - 1 # [0,1] -> [-1,1]
     pa = {k: v.to(device) for k, v in batch["pa"].items()}
     plot_samples_mf(torch.randn_like(x), pa=pa, model=base, vae=vae, steps=steps, file_path=save_path + ".pdf")
     plot_counterfactuals_mf(x, pa=pa, model=base, vae=vae, steps=steps, file_path=save_path + "_cf.pdf")

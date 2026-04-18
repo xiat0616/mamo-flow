@@ -70,7 +70,7 @@ class Trainer:
         self.rank = dist.get_rank() if self.is_dist else 0
         self.step, self.epoch = 0, 0
         self.best_loss = 1e6
-        self.eval_mc = 8
+        self.eval_mc = 2
         self.tqdm_kwargs = dict(
             disable=(self.rank != 0),
             mininterval=float(os.environ.get("TQDM_MININTERVAL", 1)),
@@ -91,7 +91,7 @@ class Trainer:
             x = x.float().to(self.device, non_blocking=True)
             pa = {k: v.to(self.device, non_blocking=True) for k, v in pa.items()}
             if channels <= 3:  # dequantize if image
-                x = (x + (torch.rand_like(x) - 0.5) / 255.0).clamp(0, 1) * 2 - 1
+                x = (x + (torch.rand_like(x) - 0.5) / 255.0).clamp(0, 1) * 2 - 1 # from [0,1] to [-1,1], add noise for dequantization
 
             self.model.zero_grad(set_to_none=True)
             if self.amp_dtype is not None:
