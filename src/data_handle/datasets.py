@@ -16,7 +16,7 @@ from torch import Tensor
 from torchvision import transforms
 
 sys.path.append("..")
-from utils import seed_worker
+from src.utils import seed_worker
 
 from dataclasses import dataclass, field
 
