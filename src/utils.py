@@ -374,7 +374,7 @@ def _get_class_schema() -> dict[str, Any]:
         pass
 
     try:
-        from data.datasets import CLASS_SCHEMA  # possible future path
+        from data_handle.datasets import CLASS_SCHEMA  # possible future path
         return CLASS_SCHEMA
     except Exception:
         pass

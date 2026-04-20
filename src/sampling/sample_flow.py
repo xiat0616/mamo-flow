@@ -1,6 +1,5 @@
 import argparse
 import json
-import math
 from pathlib import Path
 
 import torch
@@ -215,9 +214,15 @@ def _as_index_tensor(x: torch.Tensor) -> torch.Tensor:
 def apply_single_intervention(
     pa: dict[str, torch.Tensor],
     pa_rand: dict[str, torch.Tensor] | None,
-    do_key: str,
+    do_key: str | None,
     do_mode: str,
 ) -> dict[str, torch.Tensor]:
+    if do_mode == "null":
+        return clone_pa(pa)
+
+    if do_key is None:
+        raise ValueError(f"do_key must be provided for do_mode='{do_mode}'")
+
     if do_key not in pa:
         raise KeyError(f"Intervention key '{do_key}' not found in pa. Available: {list(pa.keys())}")
 
@@ -225,7 +230,6 @@ def apply_single_intervention(
     ref = pa_cf[do_key]
     num_classes = _schema_num_classes(do_key)
 
-    # Continuous variable, e.g. age.
     if num_classes is None:
         if do_mode == "flip":
             raise ValueError(
@@ -237,15 +241,12 @@ def apply_single_intervention(
         pa_cf[do_key] = pa_rand[do_key].clone()
         return pa_cf
 
-    # Discrete categorical variable stored as scalar-coded labels.
     orig_idx = _as_index_tensor(ref)
 
     if do_mode == "flip":
-        # Binary: 0 <-> 1
         if num_classes == 2:
             new_idx = 1 - orig_idx
         else:
-            # Multiclass: deterministic next-class cyclic shift.
             new_idx = (orig_idx + 1) % num_classes
 
         pa_cf[do_key] = new_idx.to(ref.dtype).view_as(ref)
@@ -255,12 +256,7 @@ def apply_single_intervention(
         if pa_rand is None or do_key not in pa_rand:
             raise ValueError(f"Random intervention for '{do_key}' requires a random source batch.")
 
-        rand_idx = _as_index_tensor(pa_rand[do_key])
-
-        # Clamp in case the sampled values come in float-coded form.
-        rand_idx = rand_idx.clamp(min=0, max=num_classes - 1)
-
-        # Ensure the discrete counterfactual actually changes the value.
+        rand_idx = _as_index_tensor(pa_rand[do_key]).clamp(min=0, max=num_classes - 1)
         same = rand_idx == orig_idx
         if same.any():
             rand_idx[same] = (orig_idx[same] + 1) % num_classes
@@ -271,17 +267,31 @@ def apply_single_intervention(
     raise ValueError(f"Unknown do_mode: {do_mode}")
 
 
-def sample_batch(
+def generate_random_from_noise(
     model: nn.Module,
     noise: torch.Tensor,
     pa: dict[str, torch.Tensor] | None,
-    steps: int,
-):
-    with torch.inference_mode():
-        try:
-            return model.sample(noise, steps=steps, pa=pa)
-        except TypeError:
-            return model.sample(noise, pa=pa, T=steps)
+    ode_method: str,
+    ode_atol: float,
+    ode_rtol: float,
+) -> torch.Tensor:
+    if not hasattr(model, "ode_solve"):
+        raise AttributeError(
+            "Random generation requires model.ode_solve(...), "
+            "but the current Flow model does not expose it."
+        )
+
+    # noise -> data
+    t = torch.tensor([0.0, 1.0], device=noise.device)
+    traj = model.ode_solve(
+        noise,
+        pa=pa,
+        t=t,
+        method=ode_method,
+        atol=ode_atol,
+        rtol=ode_rtol,
+    )
+    return traj[-1]
 
 
 def invert_to_noise(
@@ -298,16 +308,16 @@ def invert_to_noise(
             "but the current Flow model does not expose it."
         )
 
-    t = torch.tensor([0.0, 1.0], device=x.device)
-    with torch.no_grad():
-        traj = model.ode_solve(
-            x,
-            pa=pa_src,
-            t=t,
-            method=ode_method,
-            atol=ode_atol,
-            rtol=ode_rtol,
-        )
+    # data -> noise
+    t = torch.tensor([1.0, 0.0], device=x.device)
+    traj = model.ode_solve(
+        x,
+        pa=pa_src,
+        t=t,
+        method=ode_method,
+        atol=ode_atol,
+        rtol=ode_rtol,
+    )
     return traj[-1]
 
 
@@ -315,89 +325,153 @@ def generate_from_inverted_noise(
     model: nn.Module,
     noise: torch.Tensor,
     pa_cf: dict[str, torch.Tensor] | None,
-    sample_steps: int,
     ode_method: str,
     ode_atol: float,
     ode_rtol: float,
-    use_ode_generation: bool,
 ) -> torch.Tensor:
-    with torch.no_grad():
-        if use_ode_generation:
-            if not hasattr(model, "ode_solve"):
-                raise AttributeError(
-                    "ODE-based counterfactual generation requires model.ode_solve(...), "
-                    "but the current Flow model does not expose it."
-                )
-            t = torch.tensor([1.0, 0.0], device=noise.device)
-            traj = model.ode_solve(
-                noise,
-                pa=pa_cf,
-                t=t,
-                method=ode_method,
-                atol=ode_atol,
-                rtol=ode_rtol,
-            )
-            return traj[-1]
-
-        return sample_batch(
-            model=model,
-            noise=noise,
-            pa=pa_cf,
-            steps=sample_steps,
+    if not hasattr(model, "ode_solve"):
+        raise AttributeError(
+            "Counterfactual generation requires model.ode_solve(...), "
+            "but the current Flow model does not expose it."
         )
+
+    # noise -> data
+    t = torch.tensor([0.0, 1.0], device=noise.device)
+    traj = model.ode_solve(
+        noise,
+        pa=pa_cf,
+        t=t,
+        method=ode_method,
+        atol=ode_atol,
+        rtol=ode_rtol,
+    )
+    return traj[-1]
+
+
+def get_ckpt_tag(ckpt_path: str) -> str:
+    return Path(ckpt_path).stem
+
+
+def get_exp_name(train_args: argparse.Namespace) -> str:
+    return getattr(train_args, "exp_name", "unknown_exp")
+
+
+def get_sampler_tag(
+    ode_method: str,
+    ode_atol: float,
+    ode_rtol: float,
+) -> str:
+    return f"ode-{ode_method}_atol-{ode_atol:g}_rtol-{ode_rtol:g}"
+
+
+def build_sampling_root(
+    save_root: str,
+    ckpt_path: str,
+    train_args: argparse.Namespace,
+    ode_method: str,
+    ode_atol: float,
+    ode_rtol: float,
+) -> Path:
+    exp_name = get_exp_name(train_args)
+    ckpt_tag = get_ckpt_tag(ckpt_path)
+    sampler_tag = get_sampler_tag(
+        ode_method=ode_method,
+        ode_atol=ode_atol,
+        ode_rtol=ode_rtol,
+    )
+    return Path(save_root) / exp_name / ckpt_tag / sampler_tag
+
+
+def build_random_save_dir(
+    save_root: str,
+    ckpt_path: str,
+    train_args: argparse.Namespace,
+    cond_source: str,
+    ode_method: str,
+    ode_atol: float,
+    ode_rtol: float,
+) -> Path:
+    root = build_sampling_root(
+        save_root=save_root,
+        ckpt_path=ckpt_path,
+        train_args=train_args,
+        ode_method=ode_method,
+        ode_atol=ode_atol,
+        ode_rtol=ode_rtol,
+    )
+    cond_tag = "cond_dataset" if cond_source == "dataset" else "uncond"
+    return root / "randoms" / cond_tag
+
+
+def build_cf_save_dirs(
+    save_root: str,
+    ckpt_path: str,
+    train_args: argparse.Namespace,
+    do_key: str | None,
+    do_mode: str,
+    ode_method: str,
+    ode_atol: float,
+    ode_rtol: float,
+) -> dict[str, Path]:
+    root = build_sampling_root(
+        save_root=save_root,
+        ckpt_path=ckpt_path,
+        train_args=train_args,
+        ode_method=ode_method,
+        ode_atol=ode_atol,
+        ode_rtol=ode_rtol,
+    )
+
+    if do_mode == "null":
+        cf_root = root / "reconstructions" / "null"
+    else:
+        cf_root = root / "cfs" / str(do_key) / str(do_mode)
+
+    return {
+        "root": cf_root,
+        "inputs": cf_root / "inputs",
+        "cfs": cf_root / "cfs",
+        "cf_visuals": cf_root / "cf_visuals",
+    }
 
 
 def save_random_samples(
     samples: torch.Tensor,
     save_dir: Path,
     start_idx: int,
-    make_batch_grid: bool = True,
 ) -> None:
     save_dir.mkdir(parents=True, exist_ok=True)
 
     vis = ((samples.clamp(-1, 1) + 1.0) / 2.0).cpu()
-
     for i in range(vis.shape[0]):
-        save_image(vis[i], save_dir / f"sample_{start_idx + i:06d}.png")
-
-    if make_batch_grid:
-        nrow = int(math.sqrt(vis.shape[0]))
-        nrow = max(nrow, 1)
-        grid = make_grid(vis, nrow=nrow, pad_value=1.0)
-        save_image(grid, save_dir / f"grid_{start_idx:06d}.png")
+        idx = start_idx + i
+        save_image(vis[i], save_dir / f"{idx:06d}_rand.png")
 
 
 def save_counterfactual_samples(
     x_src: torch.Tensor,
     x_cf: torch.Tensor,
-    save_dir: Path,
+    save_dirs: dict[str, Path],
     start_idx: int,
-    make_batch_grid: bool = True,
 ) -> None:
-    save_dir.mkdir(parents=True, exist_ok=True)
+    for d in save_dirs.values():
+        d.mkdir(parents=True, exist_ok=True)
 
     src_vis = ((x_src.clamp(-1, 1) + 1.0) / 2.0).cpu()
     cf_vis = ((x_cf.clamp(-1, 1) + 1.0) / 2.0).cpu()
 
     for i in range(src_vis.shape[0]):
         idx = start_idx + i
-        save_image(src_vis[i], save_dir / f"src_{idx:06d}.png")
-        save_image(cf_vis[i], save_dir / f"cf_{idx:06d}.png")
+
+        save_image(src_vis[i], save_dirs["inputs"] / f"{idx:06d}_input.png")
+        save_image(cf_vis[i], save_dirs["cfs"] / f"{idx:06d}_cf.png")
 
         pair = make_grid(
             torch.stack([src_vis[i], cf_vis[i]], dim=0),
             nrow=2,
             pad_value=1.0,
         )
-        save_image(pair, save_dir / f"pair_{idx:06d}.png")
-
-    if make_batch_grid:
-        panels = []
-        for i in range(src_vis.shape[0]):
-            panels.append(src_vis[i])
-            panels.append(cf_vis[i])
-        grid = make_grid(torch.stack(panels, dim=0), nrow=2, pad_value=1.0)
-        save_image(grid, save_dir / f"grid_{start_idx:06d}.png")
+        save_image(pair, save_dirs["cf_visuals"] / f"{idx:06d}_pair.png")
 
 
 def main():
@@ -406,7 +480,6 @@ def main():
     parser.add_argument("--save_dir", type=str, required=True)
     parser.add_argument("--num_samples", type=int, default=32)
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--sample_steps", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--split", type=str, default="valid", choices=["train", "valid", "test"])
     parser.add_argument("--use_ema", action="store_true", default=False)
@@ -430,26 +503,23 @@ def main():
         "--do_mode",
         type=str,
         default="flip",
-        choices=["flip", "random"],
-        help="flip: binary flip or cyclic next-class for multiclass; random: resample from dataset.",
+        choices=["null", "flip", "random"],
+        help=(
+            "null: keep conditioning unchanged and reconstruct the input; "
+            "flip: binary flip or cyclic next-class for multiclass; "
+            "random: resample from dataset."
+        ),
     )
     parser.add_argument("--ode_method", type=str, default="dopri5")
     parser.add_argument("--ode_atol", type=float, default=1e-5)
     parser.add_argument("--ode_rtol", type=float, default=1e-5)
-    parser.add_argument(
-        "--cf_use_ode_generation",
-        action="store_true",
-        default=False,
-        help="Use ODE solve for generation after inversion instead of model.sample(...).",
-    )
 
     args = parser.parse_args()
 
-    if args.mode == "cf" and args.do_key is None:
-        parser.error("--mode cf requires --do_key")
+    if args.mode == "cf" and args.do_mode != "null" and args.do_key is None:
+        parser.error("--mode cf requires --do_key unless --do_mode null")
 
     seed_all(args.seed, determ=False)
-
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     ckpt = torch.load(args.ckpt, map_location="cpu")
@@ -465,15 +535,35 @@ def main():
     )
     model.eval()
 
-    sample_steps = (
-        args.sample_steps
-        if args.sample_steps is not None
-        else getattr(train_args, "T", 100)
-    )
-
-    save_dir = Path(args.save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-
+    if args.mode == "random":
+        save_dir = build_random_save_dir(
+            save_root=args.save_dir,
+            ckpt_path=args.ckpt,
+            train_args=train_args,
+            cond_source=args.cond_source,
+            ode_method=args.ode_method,
+            ode_atol=args.ode_atol,
+            ode_rtol=args.ode_rtol,
+        )
+        save_dir.mkdir(parents=True, exist_ok=True)
+        cf_save_dirs = None
+    elif args.mode == "cf":
+        cf_save_dirs = build_cf_save_dirs(
+            save_root=args.save_dir,
+            ckpt_path=args.ckpt,
+            train_args=train_args,
+            do_key=args.do_key,
+            do_mode=args.do_mode,
+            ode_method=args.ode_method,
+            ode_atol=args.ode_atol,
+            ode_rtol=args.ode_rtol,
+        )
+        save_dir = cf_save_dirs["root"]
+        for d in cf_save_dirs.values():
+            d.mkdir(parents=True, exist_ok=True)
+    else:
+        raise ValueError(f"Unknown mode: {args.mode}")
+    
     cond_iter = None
     if args.mode == "random" and args.cond_source == "dataset":
         cond_iter = get_iterator(train_args, args.batch_size, args.split)
@@ -490,7 +580,6 @@ def main():
         "mode": args.mode,
         "num_samples": args.num_samples,
         "batch_size": args.batch_size,
-        "sample_steps": sample_steps,
         "seed": args.seed,
         "split": args.split,
         "use_ema": args.use_ema,
@@ -500,7 +589,6 @@ def main():
         "ode_method": args.ode_method,
         "ode_atol": args.ode_atol,
         "ode_rtol": args.ode_rtol,
-        "cf_use_ode_generation": args.cf_use_ode_generation,
     }
     with open(save_dir / "sampling_args.json", "w") as f:
         json.dump(meta, f, indent=2)
@@ -529,18 +617,20 @@ def main():
                 pa = move_pa_to_device(batch["pa"], device)
                 pa = {k: v[:bs] for k, v in pa.items()}
 
-            samples = sample_batch(
+            samples = generate_random_from_noise(
                 model=model,
                 noise=noise,
                 pa=pa,
-                steps=sample_steps,
+                ode_method=args.ode_method,
+                ode_atol=args.ode_atol,
+                ode_rtol=args.ode_rtol,
             )
 
-            save_random_samples(samples, save_dir, produced, make_batch_grid=True)
+            save_random_samples(samples, save_dir, produced)
             produced += bs
             print(f"Saved {produced}/{args.num_samples} random samples to {save_dir}")
 
-        else:
+        elif args.mode == "cf":
             try:
                 batch = next(src_iter)
             except StopIteration:
@@ -582,25 +672,18 @@ def main():
                 model=model,
                 noise=noise,
                 pa_cf=pa_cf,
-                sample_steps=sample_steps,
                 ode_method=args.ode_method,
                 ode_atol=args.ode_atol,
                 ode_rtol=args.ode_rtol,
-                use_ode_generation=args.cf_use_ode_generation,
             )
 
             save_counterfactual_samples(
                 x_src=x_src,
                 x_cf=x_cf,
-                save_dir=save_dir,
+                save_dirs=cf_save_dirs,
                 start_idx=produced,
-                make_batch_grid=True,
             )
             produced += bs
-            print(f"Saved {produced}/{args.num_samples} counterfactual pairs to {save_dir}")
+            print(f"Saved {produced}/{args.num_samples} outputs to {save_dir}")
 
     print(f"Done. Samples saved to: {save_dir}")
-
-
-if __name__ == "__main__":
-    main()
