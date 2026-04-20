@@ -425,12 +425,12 @@ if __name__ == "__main__":
     # Build MeanFlow model
     # ------------------------------------------------------------------
     if args.model == "unet":
-        from model.embedder import (
+        from models.embedder import (
             GlobalCondEmbedder,
             PerAttrCondEmbedder,
             CondEmbedderConfig,
         )
-        from model.unet_mf import UNet
+        from models.unet_mf import UNet
         from src.flows.meanflow import BlockConfig, MeanFlow, MeanFlowConfig, UNetConfig
 
         sample_batch = next(iter(dataloaders["train"]))

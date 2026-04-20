@@ -358,13 +358,13 @@ if __name__ == "__main__":
     # Build model
     # ----------------------------
     if args.model == "unet":
-        from model.embedder import (
+        from models.embedder import (
             GlobalCondEmbedder,
             PerAttrCondEmbedder,
             CondEmbedderConfig,
         )
         from src.flows.flow import BlockConfig, Flow, UNetConfig
-        from model.unet import UNet
+        from models.unet import UNet
 
         # Infer raw parent input dims from one train batch
         sample_batch = next(iter(dataloaders["train"]))
