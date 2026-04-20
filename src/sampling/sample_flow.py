@@ -1,7 +1,6 @@
 import argparse
 import json
 import math
-import os
 from pathlib import Path
 
 import torch
@@ -20,12 +19,22 @@ from src.models.embedder import (
     PerAttrCondEmbedder,
     CondEmbedderConfig,
 )
-from src.models.unet import UNet  # change to unet_mf if your flow model uses that file
+from src.models.unet import UNet
 from src.flows.flow import Flow, BlockConfig, UNetConfig
-from src.utils import ModelEMA, seed_all, unwrap
+from src.utils import ModelEMA, seed_all
 
-from src.training.train_flow import infer_parent_dims_from_batch, parse_hw
 
+def infer_parent_dims_from_batch(
+    pa: dict[str, torch.Tensor],
+    parents: list[str],
+) -> dict[str, int]:
+    parent_dims: dict[str, int] = {}
+    for k in parents:
+        if k not in pa:
+            raise KeyError(f"Parent '{k}' not found in batch['pa']")
+        v = pa[k]
+        parent_dims[k] = 1 if v.ndim == 1 else int(v.shape[1])
+    return parent_dims
 
 
 def to_namespace(d: dict) -> argparse.Namespace:
@@ -145,6 +154,7 @@ def maybe_apply_ema(
 ) -> None:
     if not use_ema:
         return
+
     ema_state = ckpt.get("ema_state", None)
     if ema_state is None:
         print("EMA state not found in checkpoint; using raw model weights.")
@@ -155,22 +165,110 @@ def maybe_apply_ema(
     ema.apply()
 
 
-def get_condition_iterator(
+def get_iterator(
     train_args: argparse.Namespace,
     batch_size: int,
     split: str,
 ):
-    if train_args.cond_embedder == "none" or len(train_args.parents) == 0:
-        return None
-
     dataloaders = build_dataloaders_from_train_args(train_args, batch_size=batch_size)
     if split not in dataloaders:
         raise KeyError(f"Unknown split '{split}'. Available: {list(dataloaders.keys())}")
     return iter(dataloaders[split])
 
 
-def move_pa_to_device(pa: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
+def move_pa_to_device(
+    pa: dict[str, torch.Tensor],
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
     return {k: v.to(device, non_blocking=True) for k, v in pa.items()}
+
+
+def preprocess_x_for_sampling(
+    x: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    x = x.float().to(device, non_blocking=True)
+    channels = x.shape[1]
+    if channels <= 3:
+        x = x * 2 - 1
+    return x
+
+
+def clone_pa(pa: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    return {k: v.clone() for k, v in pa.items()}
+
+
+def _schema_num_classes(do_key: str) -> int | None:
+    if do_key not in CLASS_SCHEMA:
+        raise KeyError(f"Unknown intervention key '{do_key}'. Available: {list(CLASS_SCHEMA.keys())}")
+
+    spec = CLASS_SCHEMA[do_key]
+    if isinstance(spec, float):
+        return None
+    return int(spec)
+
+
+def _as_index_tensor(x: torch.Tensor) -> torch.Tensor:
+    return x.view(-1).round().long()
+
+
+def apply_single_intervention(
+    pa: dict[str, torch.Tensor],
+    pa_rand: dict[str, torch.Tensor] | None,
+    do_key: str,
+    do_mode: str,
+) -> dict[str, torch.Tensor]:
+    if do_key not in pa:
+        raise KeyError(f"Intervention key '{do_key}' not found in pa. Available: {list(pa.keys())}")
+
+    pa_cf = clone_pa(pa)
+    ref = pa_cf[do_key]
+    num_classes = _schema_num_classes(do_key)
+
+    # Continuous variable, e.g. age.
+    if num_classes is None:
+        if do_mode == "flip":
+            raise ValueError(
+                f"'flip' is not defined for continuous key '{do_key}'. "
+                f"Use --do_mode random instead."
+            )
+        if pa_rand is None or do_key not in pa_rand:
+            raise ValueError(f"Random intervention for '{do_key}' requires a random source batch.")
+        pa_cf[do_key] = pa_rand[do_key].clone()
+        return pa_cf
+
+    # Discrete categorical variable stored as scalar-coded labels.
+    orig_idx = _as_index_tensor(ref)
+
+    if do_mode == "flip":
+        # Binary: 0 <-> 1
+        if num_classes == 2:
+            new_idx = 1 - orig_idx
+        else:
+            # Multiclass: deterministic next-class cyclic shift.
+            new_idx = (orig_idx + 1) % num_classes
+
+        pa_cf[do_key] = new_idx.to(ref.dtype).view_as(ref)
+        return pa_cf
+
+    if do_mode == "random":
+        if pa_rand is None or do_key not in pa_rand:
+            raise ValueError(f"Random intervention for '{do_key}' requires a random source batch.")
+
+        rand_idx = _as_index_tensor(pa_rand[do_key])
+
+        # Clamp in case the sampled values come in float-coded form.
+        rand_idx = rand_idx.clamp(min=0, max=num_classes - 1)
+
+        # Ensure the discrete counterfactual actually changes the value.
+        same = rand_idx == orig_idx
+        if same.any():
+            rand_idx[same] = (orig_idx[same] + 1) % num_classes
+
+        pa_cf[do_key] = rand_idx.to(ref.dtype).view_as(ref)
+        return pa_cf
+
+    raise ValueError(f"Unknown do_mode: {do_mode}")
 
 
 def sample_batch(
@@ -183,11 +281,73 @@ def sample_batch(
         try:
             return model.sample(noise, steps=steps, pa=pa)
         except TypeError:
-            # fallback if your Flow.sample uses a different keyword
             return model.sample(noise, pa=pa, T=steps)
 
 
-def save_samples(
+def invert_to_noise(
+    model: nn.Module,
+    x: torch.Tensor,
+    pa_src: dict[str, torch.Tensor] | None,
+    ode_method: str,
+    ode_atol: float,
+    ode_rtol: float,
+) -> torch.Tensor:
+    if not hasattr(model, "ode_solve"):
+        raise AttributeError(
+            "Counterfactual generation requires model.ode_solve(...), "
+            "but the current Flow model does not expose it."
+        )
+
+    t = torch.tensor([0.0, 1.0], device=x.device)
+    with torch.no_grad():
+        traj = model.ode_solve(
+            x,
+            pa=pa_src,
+            t=t,
+            method=ode_method,
+            atol=ode_atol,
+            rtol=ode_rtol,
+        )
+    return traj[-1]
+
+
+def generate_from_inverted_noise(
+    model: nn.Module,
+    noise: torch.Tensor,
+    pa_cf: dict[str, torch.Tensor] | None,
+    sample_steps: int,
+    ode_method: str,
+    ode_atol: float,
+    ode_rtol: float,
+    use_ode_generation: bool,
+) -> torch.Tensor:
+    with torch.no_grad():
+        if use_ode_generation:
+            if not hasattr(model, "ode_solve"):
+                raise AttributeError(
+                    "ODE-based counterfactual generation requires model.ode_solve(...), "
+                    "but the current Flow model does not expose it."
+                )
+            t = torch.tensor([1.0, 0.0], device=noise.device)
+            traj = model.ode_solve(
+                noise,
+                pa=pa_cf,
+                t=t,
+                method=ode_method,
+                atol=ode_atol,
+                rtol=ode_rtol,
+            )
+            return traj[-1]
+
+        return sample_batch(
+            model=model,
+            noise=noise,
+            pa=pa_cf,
+            steps=sample_steps,
+        )
+
+
+def save_random_samples(
     samples: torch.Tensor,
     save_dir: Path,
     start_idx: int,
@@ -207,6 +367,39 @@ def save_samples(
         save_image(grid, save_dir / f"grid_{start_idx:06d}.png")
 
 
+def save_counterfactual_samples(
+    x_src: torch.Tensor,
+    x_cf: torch.Tensor,
+    save_dir: Path,
+    start_idx: int,
+    make_batch_grid: bool = True,
+) -> None:
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    src_vis = ((x_src.clamp(-1, 1) + 1.0) / 2.0).cpu()
+    cf_vis = ((x_cf.clamp(-1, 1) + 1.0) / 2.0).cpu()
+
+    for i in range(src_vis.shape[0]):
+        idx = start_idx + i
+        save_image(src_vis[i], save_dir / f"src_{idx:06d}.png")
+        save_image(cf_vis[i], save_dir / f"cf_{idx:06d}.png")
+
+        pair = make_grid(
+            torch.stack([src_vis[i], cf_vis[i]], dim=0),
+            nrow=2,
+            pad_value=1.0,
+        )
+        save_image(pair, save_dir / f"pair_{idx:06d}.png")
+
+    if make_batch_grid:
+        panels = []
+        for i in range(src_vis.shape[0]):
+            panels.append(src_vis[i])
+            panels.append(cf_vis[i])
+        grid = make_grid(torch.stack(panels, dim=0), nrow=2, pad_value=1.0)
+        save_image(grid, save_dir / f"grid_{start_idx:06d}.png")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", type=str, required=True)
@@ -217,14 +410,43 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--split", type=str, default="valid", choices=["train", "valid", "test"])
     parser.add_argument("--use_ema", action="store_true", default=False)
+
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="random",
+        choices=["random", "cf"],
+        help="random: sample from Gaussian noise; cf: generate counterfactuals from real images.",
+    )
     parser.add_argument(
         "--cond_source",
         type=str,
         default="dataset",
         choices=["dataset", "none"],
-        help="How to obtain conditioning variables for conditional sampling.",
+        help="How to obtain conditioning variables for random conditional sampling.",
     )
+    parser.add_argument("--do_key", type=str, default=None)
+    parser.add_argument(
+        "--do_mode",
+        type=str,
+        default="flip",
+        choices=["flip", "random"],
+        help="flip: binary flip or cyclic next-class for multiclass; random: resample from dataset.",
+    )
+    parser.add_argument("--ode_method", type=str, default="dopri5")
+    parser.add_argument("--ode_atol", type=float, default=1e-5)
+    parser.add_argument("--ode_rtol", type=float, default=1e-5)
+    parser.add_argument(
+        "--cf_use_ode_generation",
+        action="store_true",
+        default=False,
+        help="Use ODE solve for generation after inversion instead of model.sample(...).",
+    )
+
     args = parser.parse_args()
+
+    if args.mode == "cf" and args.do_key is None:
+        parser.error("--mode cf requires --do_key")
 
     seed_all(args.seed, determ=False)
 
@@ -243,17 +465,29 @@ def main():
     )
     model.eval()
 
-    sample_steps = args.sample_steps if args.sample_steps is not None else getattr(train_args, "T", 100)
+    sample_steps = (
+        args.sample_steps
+        if args.sample_steps is not None
+        else getattr(train_args, "T", 100)
+    )
 
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
     cond_iter = None
-    if args.cond_source == "dataset":
-        cond_iter = get_condition_iterator(train_args, args.batch_size, args.split)
+    if args.mode == "random" and args.cond_source == "dataset":
+        cond_iter = get_iterator(train_args, args.batch_size, args.split)
+
+    src_iter = None
+    rand_iter = None
+    if args.mode == "cf":
+        src_iter = get_iterator(train_args, args.batch_size, args.split)
+        if args.do_mode == "random":
+            rand_iter = get_iterator(train_args, args.batch_size, args.split)
 
     meta = {
         "ckpt": args.ckpt,
+        "mode": args.mode,
         "num_samples": args.num_samples,
         "batch_size": args.batch_size,
         "sample_steps": sample_steps,
@@ -261,6 +495,12 @@ def main():
         "split": args.split,
         "use_ema": args.use_ema,
         "cond_source": args.cond_source,
+        "do_key": args.do_key,
+        "do_mode": args.do_mode,
+        "ode_method": args.ode_method,
+        "ode_atol": args.ode_atol,
+        "ode_rtol": args.ode_rtol,
+        "cf_use_ode_generation": args.cf_use_ode_generation,
     }
     with open(save_dir / "sampling_args.json", "w") as f:
         json.dump(meta, f, indent=2)
@@ -269,35 +509,95 @@ def main():
     while produced < args.num_samples:
         bs = min(args.batch_size, args.num_samples - produced)
 
-        noise = torch.randn(
-            bs,
-            train_args.img_channels,
-            train_args.img_height,
-            train_args.img_width,
-            device=device,
-        )
+        if args.mode == "random":
+            noise = torch.randn(
+                bs,
+                train_args.img_channels,
+                train_args.img_height,
+                train_args.img_width,
+                device=device,
+            )
 
-        pa = None
-        if cond_iter is not None:
+            pa = None
+            if cond_iter is not None:
+                try:
+                    batch = next(cond_iter)
+                except StopIteration:
+                    cond_iter = get_iterator(train_args, args.batch_size, args.split)
+                    batch = next(cond_iter)
+
+                pa = move_pa_to_device(batch["pa"], device)
+                pa = {k: v[:bs] for k, v in pa.items()}
+
+            samples = sample_batch(
+                model=model,
+                noise=noise,
+                pa=pa,
+                steps=sample_steps,
+            )
+
+            save_random_samples(samples, save_dir, produced, make_batch_grid=True)
+            produced += bs
+            print(f"Saved {produced}/{args.num_samples} random samples to {save_dir}")
+
+        else:
             try:
-                batch = next(cond_iter)
+                batch = next(src_iter)
             except StopIteration:
-                cond_iter = get_condition_iterator(train_args, args.batch_size, args.split)
-                batch = next(cond_iter)
+                src_iter = get_iterator(train_args, args.batch_size, args.split)
+                batch = next(src_iter)
 
-            pa = move_pa_to_device(batch["pa"], device)
-            pa = {k: v[:bs] for k, v in pa.items()}
+            x_src = preprocess_x_for_sampling(batch["x"][:bs], device)
+            pa_src = move_pa_to_device(batch["pa"], device)
+            pa_src = {k: v[:bs] for k, v in pa_src.items()}
 
-        samples = sample_batch(
-            model=model,
-            noise=noise,
-            pa=pa,
-            steps=sample_steps,
-        )
+            pa_rand = None
+            if args.do_mode == "random":
+                try:
+                    rand_batch = next(rand_iter)
+                except StopIteration:
+                    rand_iter = get_iterator(train_args, args.batch_size, args.split)
+                    rand_batch = next(rand_iter)
 
-        save_samples(samples, save_dir, produced, make_batch_grid=True)
-        produced += bs
-        print(f"Saved {produced}/{args.num_samples} samples to {save_dir}")
+                pa_rand = move_pa_to_device(rand_batch["pa"], device)
+                pa_rand = {k: v[:bs] for k, v in pa_rand.items()}
+
+            pa_cf = apply_single_intervention(
+                pa=pa_src,
+                pa_rand=pa_rand,
+                do_key=args.do_key,
+                do_mode=args.do_mode,
+            )
+
+            noise = invert_to_noise(
+                model=model,
+                x=x_src,
+                pa_src=pa_src,
+                ode_method=args.ode_method,
+                ode_atol=args.ode_atol,
+                ode_rtol=args.ode_rtol,
+            )
+
+            x_cf = generate_from_inverted_noise(
+                model=model,
+                noise=noise,
+                pa_cf=pa_cf,
+                sample_steps=sample_steps,
+                ode_method=args.ode_method,
+                ode_atol=args.ode_atol,
+                ode_rtol=args.ode_rtol,
+                use_ode_generation=args.cf_use_ode_generation,
+            )
+
+            save_counterfactual_samples(
+                x_src=x_src,
+                x_cf=x_cf,
+                save_dir=save_dir,
+                start_idx=produced,
+                make_batch_grid=True,
+            )
+            produced += bs
+            print(f"Saved {produced}/{args.num_samples} counterfactual pairs to {save_dir}")
 
     print(f"Done. Samples saved to: {save_dir}")
 

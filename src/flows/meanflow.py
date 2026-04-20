@@ -325,9 +325,10 @@ class ImprovedMeanFlow(MeanFlow):
 
     and regresses it toward the conditional velocity eps - x.
 
-    This implementation includes the core iMF training objective with the
-    boundary-condition formulation. Optional extensions such as an auxiliary
-    v-head and flexible-CFG training are not included here.
+    This version also supports the same adaptive per-sample loss weighting
+    used in MeanFlow:
+        weight_i = 1 / (mse_i + eps)^p
+    where p = self.mf_config.adaptive_weight_p.
     """
 
     def forward(
@@ -346,14 +347,20 @@ class ImprovedMeanFlow(MeanFlow):
         """
         batch_size, device = x.shape[0], x.device
 
+        # --------------------------------------------------------------
+        # Sample noise and time pair (r, t) with t >= r
+        # --------------------------------------------------------------
         eps = torch.randn(x.shape, device=device, dtype=x.dtype, generator=g)
         r, t = self._sample_times(batch_size, device, g)
 
+        # Conditional target velocity for the linear interpolant
         v_target = eps - x
 
+        # Build z_t = (1 - t) x + t eps
         t_bc = t.reshape(-1, *([1] * (x.dim() - 1)))
         z_t = (1.0 - t_bc) * x + t_bc * eps
 
+        # Training-time conditional embedding with label dropout
         cond_emb = self._get_train_cond_emb(pa, batch_size, device, g)
 
         if self.training and hasattr(self.forward_nn, "normalize_weights"):
@@ -362,8 +369,10 @@ class ImprovedMeanFlow(MeanFlow):
         def _fn(z_: Tensor, r_: Tensor, t_: Tensor) -> Tensor:
             return self._net_call(z_, r_, t_, cond_emb)
 
+        # Main average-velocity prediction
         u = _fn(z_t, r, t)
 
+        # Boundary velocity and JVP branch are target-only
         with torch.no_grad():
             v_hat = _fn(z_t, t, t)
             tangents = (
@@ -373,12 +382,22 @@ class ImprovedMeanFlow(MeanFlow):
             )
             _, dudt = jvp(_fn, (z_t, r, t), tangents)
 
+        # Compound iMF predictor
         dt = (t - r).reshape(-1, *([1] * (u.dim() - 1)))
         V = u + dt * dudt.detach()
 
+        # Per-sample error
         error = V - v_target
         sq_err = (error ** 2).flatten(1).mean(1)
-        loss = sq_err.mean()
+
+        # Same adaptive weighting scheme as MeanFlow
+        p = self.mf_config.adaptive_weight_p
+        if p > 0:
+            weight = 1.0 / (sq_err.detach() + self.mf_config.adaptive_weight_eps) ** p
+        else:
+            weight = torch.ones_like(sq_err)
+
+        loss = (weight * sq_err).mean()
         raw_mse = sq_err.mean().detach()
 
         if self.training:

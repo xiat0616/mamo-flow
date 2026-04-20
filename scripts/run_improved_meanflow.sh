@@ -15,7 +15,7 @@ cond_embed_dim=160
 p_uncond=0.2
 
 epochs=10000
-bs=24
+bs=20
 lr=1e-4
 
 # ----------------------------
