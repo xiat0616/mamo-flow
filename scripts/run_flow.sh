@@ -115,7 +115,7 @@ srun uv run torchrun \
     --rdzv_id="\$SLURM_JOB_ID" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="\$MASTER_ADDR:\$MASTER_PORT" \
-    ./src/train_flow.py ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
+    ./src/training/train_flow.py ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
 EOF
 
 elif [ "$2" = "gpus" ]; then
@@ -141,7 +141,7 @@ srun uv run torchrun \
     --rdzv_id="\$SLURM_JOB_ID" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="\$MASTER_ADDR:\$MASTER_PORT" \
-    ./src/train_flow.py ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
+    ./src/training/train_flow.py ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
 EOF
 
 else
@@ -158,5 +158,5 @@ else
         --rdzv_id="${RDZV_ID}" \
         --rdzv_backend=c10d \
         --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
-        ./src/train_flow.py "${ARGS[@]}" | tee "./checkpoints/$exp_name/log.out"
+        ./src/training/train_flow.py "${ARGS[@]}" | tee "./checkpoints/$exp_name/log.out"
 fi
