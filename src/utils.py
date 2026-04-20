@@ -26,17 +26,17 @@ from torchvision.utils import make_grid
 # -----------------------------------------------------------------------------
 
 DEFAULT_IDX_TO_NAME: dict[str, list[str]] = {
-    "dataset": ["nan", "MIC", "REX", "CXP", "PAD", "NIH", "BRX", "VIN"],
-    "view": ["nan", "AP", "PA", "LATERAL"],
-    "race": ["nan", "Asian", "Black", "White"],
-    "sex": ["nan", "Male", "Female"],
-    "disease": ["nan", "N", "P"],
-    # Add dataset-specific mappings here if desired:
-    # "density": ["nan", "A", "B", "C", "D"],
-    # "cview": [...],
-    # "scanner": [...],
+    "view": ["MLO", "non-MLO"],
+    "density": ["A", "B", "C", "D"],
+    "scanner": [
+        "Selenia Dimensions",
+        "Senographe Pristina",
+        "Senograph 2000D",
+        "Lorad Selenia",
+        "Clearview CSm",
+        "Senographe Essential",
+    ],
 }
-
 
 # -----------------------------------------------------------------------------
 # EMA
