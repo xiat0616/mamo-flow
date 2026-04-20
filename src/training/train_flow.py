@@ -9,8 +9,8 @@ from torch.nn.parallel.distributed import DistributedDataParallel
 from tqdm import tqdm
 
 import wandb
-from data.datasets import CLASS_SCHEMA, get_embed, get_dataloaders, DataLoaderConfig, DatasetConfig
-from utils import (
+from src.data_handle.datasets import CLASS_SCHEMA, get_embed, get_dataloaders, DataLoaderConfig, DatasetConfig
+from src.utils import (
     ModelEMA,
     get_mc_stats,
     save_plots,
@@ -358,13 +358,13 @@ if __name__ == "__main__":
     # Build model
     # ----------------------------
     if args.model == "unet":
-        from models.embedder import (
+        from src.models.embedder import (
             GlobalCondEmbedder,
             PerAttrCondEmbedder,
             CondEmbedderConfig,
         )
         from src.flows.flow import BlockConfig, Flow, UNetConfig
-        from models.unet import UNet
+        from src.models.unet import UNet
 
         # Infer raw parent input dims from one train batch
         sample_batch = next(iter(dataloaders["train"]))

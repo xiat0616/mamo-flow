@@ -9,14 +9,14 @@ from torch.nn.parallel.distributed import DistributedDataParallel
 from tqdm import tqdm
 
 import wandb
-from data_handle.datasets import (
+from src.data_handle.datasets import (
     CLASS_SCHEMA,
     get_embed,
     get_dataloaders,
     DataLoaderConfig,
     DatasetConfig,
 )
-from utils import (
+from src.utils import (
     ModelEMA,
     get_mc_stats,
     save_plots_mf,
@@ -425,12 +425,12 @@ if __name__ == "__main__":
     # Build iMF model
     # ------------------------------------------------------------------
     if args.model == "unet":
-        from models.embedder import (
+        from src.models.embedder import (
             GlobalCondEmbedder,
             PerAttrCondEmbedder,
             CondEmbedderConfig,
         )
-        from models.unet_mf import UNet
+        from src.models.unet_mf import UNet
         from src.flows.meanflow import (
             BlockConfig,
             ImprovedMeanFlow,

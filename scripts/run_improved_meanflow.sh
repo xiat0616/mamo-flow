@@ -153,7 +153,7 @@ srun uv run torchrun \
     --rdzv_id="\$SLURM_JOB_ID" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="\$MASTER_ADDR:\$MASTER_PORT" \
-    ./src/training/train_improved_meanflow.py ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
+    -m src.training.train_improved_meanflow ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
 EOF
 
 else
