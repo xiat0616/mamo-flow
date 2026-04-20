@@ -4,7 +4,6 @@ import datetime
 import inspect
 import os
 import random
-import time
 from collections.abc import Iterable
 
 import matplotlib.pyplot as plt
@@ -261,7 +260,7 @@ def plot_counterfactuals(
     import numpy as np
     import matplotlib.pyplot as plt
     from mpl_toolkits.axes_grid1 import make_axes_locatable
-    from data_handle.datasets import CLASS_SCHEMA
+    from data.datasets import CLASS_SCHEMA
 
     bs = x.shape[0]
     do_pa = {k: v.clone() for k, v in pa.items()}
@@ -468,7 +467,7 @@ def plot_counterfactuals_mf(
 ) -> None:
     import numbers
     import time
-    from data_handle.datasets import CLASS_SCHEMA
+    from data.datasets import CLASS_SCHEMA
 
     bs = x.shape[0]
     do_pa = {k: v.clone() for k, v in pa.items()}
