@@ -4,7 +4,9 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torchvision.utils import make_grid, save_image
+from PIL import Image, ImageDraw, ImageFont
+from torchvision.transforms.functional import to_pil_image
+from torchvision.utils import save_image
 
 from src.data_handle.datasets import (
     CLASS_SCHEMA,
@@ -21,6 +23,11 @@ from src.models.embedder import (
 from src.models.unet import UNet
 from src.flows.flow import Flow, BlockConfig, UNetConfig
 from src.utils import ModelEMA, seed_all
+
+
+DENSITY_LABELS = {0: "A", 1: "B", 2: "C", 3: "D"}
+VIEW_LABELS = {0: "MLO", 1: "CC"}
+CVIEW_LABELS = {0: "2D", 1: "CView"}
 
 
 def infer_parent_dims_from_batch(
@@ -281,7 +288,6 @@ def generate_random_from_noise(
             "but the current Flow model does not expose it."
         )
 
-    # noise -> data
     t = torch.tensor([0.0, 1.0], device=noise.device)
     traj = model.ode_solve(
         noise,
@@ -308,7 +314,6 @@ def invert_to_noise(
             "but the current Flow model does not expose it."
         )
 
-    # data -> noise
     t = torch.tensor([1.0, 0.0], device=x.device)
     traj = model.ode_solve(
         x,
@@ -335,7 +340,6 @@ def generate_from_inverted_noise(
             "but the current Flow model does not expose it."
         )
 
-    # noise -> data
     t = torch.tensor([0.0, 1.0], device=noise.device)
     traj = model.ode_solve(
         noise,
@@ -356,12 +360,22 @@ def get_exp_name(train_args: argparse.Namespace) -> str:
     return getattr(train_args, "exp_name", "unknown_exp")
 
 
+def _format_float_tag(x: float) -> str:
+    s = f"{x:.0e}"
+    s = s.replace("e-0", "e-").replace("e+0", "e+")
+    return s
+
+
 def get_sampler_tag(
     ode_method: str,
     ode_atol: float,
     ode_rtol: float,
 ) -> str:
-    return f"ode-{ode_method}_atol-{ode_atol:g}_rtol-{ode_rtol:g}"
+    return (
+        f"ode-{ode_method}"
+        f"_atol-{_format_float_tag(ode_atol)}"
+        f"_rtol-{_format_float_tag(ode_rtol)}"
+    )
 
 
 def build_sampling_root(
@@ -435,6 +449,103 @@ def build_cf_save_dirs(
     }
 
 
+def _get_pa_scalar(pa: dict[str, torch.Tensor], key: str, idx: int) -> float:
+    v = pa[key]
+    if v.ndim == 0:
+        return float(v.detach().cpu().item())
+    if v.ndim == 1:
+        return float(v[idx].detach().cpu().item())
+    return float(v[idx, 0].detach().cpu().item())
+
+
+def _format_pa_value(key: str, value: float) -> str:
+    if key == "age":
+        return f"{value * 100:.1f}"
+
+    ivalue = int(round(value))
+    if key == "density":
+        return DENSITY_LABELS.get(ivalue, str(ivalue))
+    if key == "view":
+        return VIEW_LABELS.get(ivalue, str(ivalue))
+    if key == "cview":
+        return CVIEW_LABELS.get(ivalue, str(ivalue))
+    return str(ivalue)
+
+
+def _format_attr_block(
+    title: str,
+    pa: dict[str, torch.Tensor],
+    idx: int,
+    parents: list[str],
+    items_per_line: int = 2,
+) -> str:
+    items = []
+    for key in parents:
+        value = _get_pa_scalar(pa, key, idx)
+        items.append(f"{key}={_format_pa_value(key, value)}")
+
+    lines = [title]
+    for start in range(0, len(items), items_per_line):
+        lines.append(" | ".join(items[start:start + items_per_line]))
+    return "\n".join(lines)
+
+
+def _render_pair_with_subtitles(
+    src_img: torch.Tensor,
+    cf_img: torch.Tensor,
+    pa_src: dict[str, torch.Tensor],
+    pa_cf: dict[str, torch.Tensor],
+    idx: int,
+    parents: list[str],
+    gutter: int = 8,
+    pad: int = 6,
+) -> Image.Image:
+    src_pil = to_pil_image(src_img).convert("RGB")
+    cf_pil = to_pil_image(cf_img).convert("RGB")
+
+    pair_w = src_pil.width + gutter + cf_pil.width
+    pair_h = max(src_pil.height, cf_pil.height)
+
+    pair_img = Image.new("RGB", (pair_w, pair_h), "white")
+    pair_img.paste(src_pil, (0, 0))
+    pair_img.paste(cf_pil, (src_pil.width + gutter, 0))
+
+    font = ImageFont.load_default()
+
+    left_text = _format_attr_block("input", pa_src, idx, parents)
+    right_text = _format_attr_block("cf", pa_cf, idx, parents)
+
+    probe = Image.new("RGB", (10, 10), "white")
+    draw_probe = ImageDraw.Draw(probe)
+
+    left_bbox = draw_probe.multiline_textbbox((0, 0), left_text, font=font, spacing=2)
+    right_bbox = draw_probe.multiline_textbbox((0, 0), right_text, font=font, spacing=2)
+
+    left_h = left_bbox[3] - left_bbox[1]
+    right_h = right_bbox[3] - right_bbox[1]
+    text_h = max(left_h, right_h) + 2 * pad
+
+    canvas = Image.new("RGB", (pair_w, pair_h + text_h), "white")
+    canvas.paste(pair_img, (0, 0))
+
+    draw = ImageDraw.Draw(canvas)
+    draw.multiline_text(
+        (pad, pair_h + pad),
+        left_text,
+        fill="black",
+        font=font,
+        spacing=2,
+    )
+    draw.multiline_text(
+        (src_pil.width + gutter + pad, pair_h + pad),
+        right_text,
+        fill="black",
+        font=font,
+        spacing=2,
+    )
+    return canvas
+
+
 def save_random_samples(
     samples: torch.Tensor,
     save_dir: Path,
@@ -451,6 +562,9 @@ def save_random_samples(
 def save_counterfactual_samples(
     x_src: torch.Tensor,
     x_cf: torch.Tensor,
+    pa_src: dict[str, torch.Tensor],
+    pa_cf: dict[str, torch.Tensor],
+    parents: list[str],
     save_dirs: dict[str, Path],
     start_idx: int,
 ) -> None:
@@ -466,12 +580,15 @@ def save_counterfactual_samples(
         save_image(src_vis[i], save_dirs["inputs"] / f"{idx:06d}_input.png")
         save_image(cf_vis[i], save_dirs["cfs"] / f"{idx:06d}_cf.png")
 
-        pair = make_grid(
-            torch.stack([src_vis[i], cf_vis[i]], dim=0),
-            nrow=2,
-            pad_value=1.0,
+        pair_img = _render_pair_with_subtitles(
+            src_img=src_vis[i],
+            cf_img=cf_vis[i],
+            pa_src=pa_src,
+            pa_cf=pa_cf,
+            idx=i,
+            parents=parents,
         )
-        save_image(pair, save_dirs["cf_visuals"] / f"{idx:06d}_pair.png")
+        pair_img.save(save_dirs["cf_visuals"] / f"{idx:06d}_pair.png")
 
 
 def main():
@@ -519,7 +636,7 @@ def main():
     if args.mode == "cf" and args.do_mode != "null" and args.do_key is None:
         parser.error("--mode cf requires --do_key unless --do_mode null")
 
-    seed_all(args.seed, determ=False)
+    seed_all(args.seed, deterministic=False)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     ckpt = torch.load(args.ckpt, map_location="cpu")
@@ -563,7 +680,7 @@ def main():
             d.mkdir(parents=True, exist_ok=True)
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
-    
+
     cond_iter = None
     if args.mode == "random" and args.cond_source == "dataset":
         cond_iter = get_iterator(train_args, args.batch_size, args.split)
@@ -680,6 +797,9 @@ def main():
             save_counterfactual_samples(
                 x_src=x_src,
                 x_cf=x_cf,
+                pa_src=pa_src,
+                pa_cf=pa_cf,
+                parents=train_args.parents,
                 save_dirs=cf_save_dirs,
                 start_idx=produced,
             )
@@ -687,3 +807,7 @@ def main():
             print(f"Saved {produced}/{args.num_samples} outputs to {save_dir}")
 
     print(f"Done. Samples saved to: {save_dir}")
+
+
+if __name__ == "__main__":
+    main()

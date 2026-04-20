@@ -472,7 +472,7 @@ def get_dataloaders(
     rank = torch.distributed.get_rank() if is_dist else 0
 
     dataloaders = {}
-    for k in ["train", "valid"]:  # NOTE: omitting test set for now
+    for k in ["train", "valid", "test"]:  # NOTE: omitting test set for now
         is_train = k == "train"
         seed, sampler = int(cfg.seed + (7654321 * s if is_train else 0)), None
         if is_dist:
