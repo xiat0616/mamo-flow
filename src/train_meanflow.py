@@ -71,7 +71,7 @@ class Trainer:
         self.rank = dist.get_rank() if self.is_dist else 0
         self.step, self.epoch = 0, 0
         self.best_loss = 1e6
-        self.eval_mc = 2
+        self.eval_mc = 8
         self.tqdm_kwargs = dict(
             disable=(self.rank != 0),
             mininterval=float(os.environ.get("TQDM_MININTERVAL", 1)),
@@ -100,12 +100,16 @@ class Trainer:
                 x = (x + (torch.rand_like(x) - 0.5) / 255.0).clamp(0, 1) * 2 - 1
 
             self.optimizer.zero_grad(set_to_none=True)
-            loss = self.model(x, pa, g=None)
+            result = self.model(x, pa, g=None)
+            loss, raw_mse = result if isinstance(result, tuple) else (result, None)
             loss.backward()
 
             stats = {
                 "gnorm": nn.utils.clip_grad_norm_(self.model.parameters(), 1.0).item()
             }
+            if raw_mse is not None:
+                stats["raw_mse"] = raw_mse.item()
+
             self.optimizer.step()
 
             if self.scheduler is not None:
@@ -180,7 +184,11 @@ class Trainer:
 
         return (total_loss / n).item()
 
-    @torch.inference_mode()
+    # CRITICAL FIX: use @torch.no_grad() instead of @torch.inference_mode().
+    # torch.func.jvp uses forward-mode AD which requires dual tensors —
+    # inference_mode() creates inference tensors that block this.
+    # no_grad() only disables the reverse-mode tape, which is fine.
+    @torch.no_grad()
     def eval_epoch(
         self,
         dataloader: torch.utils.data.DataLoader,

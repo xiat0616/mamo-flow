@@ -63,7 +63,7 @@ ARGS=(
     --betas 0.9 0.999
     --eps=1e-8
     --ema_rate=0.9999
-    --eval_freq=10
+    --eval_freq=5000
     --num_workers=8
     --prefetch_factor=4
     --dist
@@ -101,7 +101,6 @@ if [ "$2" = "gpus48" ]; then
     sbatch <<EOF
 #!/bin/bash
 #SBATCH --partition=gpus48
-#SBATCH --nodelist=mira01
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
 #SBATCH --output=../checkpoints/$exp_name/slurm.%j.log
 
@@ -113,9 +112,10 @@ source ~/.bashrc
 
 nvidia-smi
 export OMP_NUM_THREADS=${NPROC_PER_NODE}
-export TQDM_MININTERVAL=10
+export TQDM_MININTERVAL=300
 export MASTER_ADDR=\$(scontrol show hostnames "\$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=\$(shuf -i 10001-29500 -n 1)
+export NCCL_P2P_DISABLE=1
 
 srun uv run torchrun \
     --nnodes=1 \
@@ -130,7 +130,7 @@ elif [ "$2" = "gpus" ]; then
     sbatch <<EOF
 #!/bin/bash
 #SBATCH --partition=gpus24
-#SBATCH --nodelist=mira04
+#SBATCH --nodelist=mira05
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
 #SBATCH --output=../checkpoints/$exp_name/slurm.%j.log
 
@@ -140,7 +140,7 @@ source ~/.bashrc
 
 nvidia-smi
 export OMP_NUM_THREADS=3
-export TQDM_MININTERVAL=10
+export TQDM_MININTERVAL=300
 export MASTER_ADDR=\$(scontrol show hostnames "\$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=\$(shuf -i 10001-29500 -n 1)
 
