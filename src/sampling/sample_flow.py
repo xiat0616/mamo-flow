@@ -2,9 +2,11 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image, ImageDraw, ImageFont
+from matplotlib import colormaps
 from torchvision.transforms.functional import to_pil_image
 from torchvision.utils import save_image
 
@@ -51,6 +53,34 @@ def select_amp_dtype(device: torch.device) -> torch.dtype | None:
     if device.type == "cuda" and torch.cuda.get_device_capability(device)[0] >= 7:
         return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     return None
+
+
+def _format_float_tag(x: float) -> str:
+    s = f"{x:.0e}"
+    s = s.replace("e-0", "e-").replace("e+0", "e+")
+    return s
+
+
+def build_time_grid(
+    direction: str,
+    device: torch.device,
+    ode_steps: int | None,
+) -> torch.Tensor:
+    if ode_steps is None:
+        if direction == "forward":
+            return torch.tensor([0.0, 1.0], device=device)
+        if direction == "backward":
+            return torch.tensor([1.0, 0.0], device=device)
+        raise ValueError(f"Unknown direction: {direction}")
+
+    if ode_steps < 1:
+        raise ValueError(f"ode_steps must be >= 1, got {ode_steps}")
+
+    if direction == "forward":
+        return torch.linspace(0.0, 1.0, ode_steps + 1, device=device)
+    if direction == "backward":
+        return torch.linspace(1.0, 0.0, ode_steps + 1, device=device)
+    raise ValueError(f"Unknown direction: {direction}")
 
 
 def build_dataloaders_from_train_args(
@@ -281,6 +311,7 @@ def generate_random_from_noise(
     ode_method: str,
     ode_atol: float,
     ode_rtol: float,
+    ode_steps: int | None,
 ) -> torch.Tensor:
     if not hasattr(model, "ode_solve"):
         raise AttributeError(
@@ -288,7 +319,7 @@ def generate_random_from_noise(
             "but the current Flow model does not expose it."
         )
 
-    t = torch.tensor([0.0, 1.0], device=noise.device)
+    t = build_time_grid("forward", noise.device, ode_steps)
     traj = model.ode_solve(
         noise,
         pa=pa,
@@ -307,6 +338,7 @@ def invert_to_noise(
     ode_method: str,
     ode_atol: float,
     ode_rtol: float,
+    ode_steps: int | None,
 ) -> torch.Tensor:
     if not hasattr(model, "ode_solve"):
         raise AttributeError(
@@ -314,7 +346,7 @@ def invert_to_noise(
             "but the current Flow model does not expose it."
         )
 
-    t = torch.tensor([1.0, 0.0], device=x.device)
+    t = build_time_grid("backward", x.device, ode_steps)
     traj = model.ode_solve(
         x,
         pa=pa_src,
@@ -333,6 +365,7 @@ def generate_from_inverted_noise(
     ode_method: str,
     ode_atol: float,
     ode_rtol: float,
+    ode_steps: int | None,
 ) -> torch.Tensor:
     if not hasattr(model, "ode_solve"):
         raise AttributeError(
@@ -340,7 +373,7 @@ def generate_from_inverted_noise(
             "but the current Flow model does not expose it."
         )
 
-    t = torch.tensor([0.0, 1.0], device=noise.device)
+    t = build_time_grid("forward", noise.device, ode_steps)
     traj = model.ode_solve(
         noise,
         pa=pa_cf,
@@ -360,22 +393,20 @@ def get_exp_name(train_args: argparse.Namespace) -> str:
     return getattr(train_args, "exp_name", "unknown_exp")
 
 
-def _format_float_tag(x: float) -> str:
-    s = f"{x:.0e}"
-    s = s.replace("e-0", "e-").replace("e+0", "e+")
-    return s
-
-
 def get_sampler_tag(
     ode_method: str,
     ode_atol: float,
     ode_rtol: float,
+    ode_steps: int | None,
 ) -> str:
-    return (
+    base = (
         f"ode-{ode_method}"
         f"_atol-{_format_float_tag(ode_atol)}"
         f"_rtol-{_format_float_tag(ode_rtol)}"
     )
+    if ode_steps is not None:
+        base += f"_steps-{ode_steps}"
+    return base
 
 
 def build_sampling_root(
@@ -385,6 +416,7 @@ def build_sampling_root(
     ode_method: str,
     ode_atol: float,
     ode_rtol: float,
+    ode_steps: int | None,
 ) -> Path:
     exp_name = get_exp_name(train_args)
     ckpt_tag = get_ckpt_tag(ckpt_path)
@@ -392,6 +424,7 @@ def build_sampling_root(
         ode_method=ode_method,
         ode_atol=ode_atol,
         ode_rtol=ode_rtol,
+        ode_steps=ode_steps,
     )
     return Path(save_root) / exp_name / ckpt_tag / sampler_tag
 
@@ -404,6 +437,7 @@ def build_random_save_dir(
     ode_method: str,
     ode_atol: float,
     ode_rtol: float,
+    ode_steps: int | None,
 ) -> Path:
     root = build_sampling_root(
         save_root=save_root,
@@ -412,6 +446,7 @@ def build_random_save_dir(
         ode_method=ode_method,
         ode_atol=ode_atol,
         ode_rtol=ode_rtol,
+        ode_steps=ode_steps,
     )
     cond_tag = "cond_dataset" if cond_source == "dataset" else "uncond"
     return root / "randoms" / cond_tag
@@ -426,6 +461,7 @@ def build_cf_save_dirs(
     ode_method: str,
     ode_atol: float,
     ode_rtol: float,
+    ode_steps: int | None,
 ) -> dict[str, Path]:
     root = build_sampling_root(
         save_root=save_root,
@@ -434,6 +470,7 @@ def build_cf_save_dirs(
         ode_method=ode_method,
         ode_atol=ode_atol,
         ode_rtol=ode_rtol,
+        ode_steps=ode_steps,
     )
 
     if do_mode == "null":
@@ -490,59 +527,120 @@ def _format_attr_block(
     return "\n".join(lines)
 
 
-def _render_pair_with_subtitles(
+def _make_diff_heatmap(
+    src_img: torch.Tensor,
+    cf_img: torch.Tensor,
+) -> tuple[Image.Image, float]:
+    src_np = src_img.detach().cpu().float().numpy()
+    cf_np = cf_img.detach().cpu().float().numpy()
+
+    if src_np.ndim == 3:
+        src_gray = src_np.mean(axis=0)
+        cf_gray = cf_np.mean(axis=0)
+    else:
+        src_gray = src_np
+        cf_gray = cf_np
+
+    diff = cf_gray - src_gray
+    vmax = float(np.max(np.abs(diff)))
+    vmax = max(vmax, 1e-8)
+
+    diff_norm = (diff / vmax + 1.0) / 2.0
+    cmap = colormaps["coolwarm"]
+    diff_rgb = (cmap(diff_norm)[..., :3] * 255).astype(np.uint8)
+
+    return Image.fromarray(diff_rgb), vmax
+
+
+def _render_cf_visual_with_diff(
     src_img: torch.Tensor,
     cf_img: torch.Tensor,
     pa_src: dict[str, torch.Tensor],
     pa_cf: dict[str, torch.Tensor],
     idx: int,
     parents: list[str],
-    gutter: int = 8,
+    gutter: int = 12,
     pad: int = 6,
 ) -> Image.Image:
     src_pil = to_pil_image(src_img).convert("RGB")
     cf_pil = to_pil_image(cf_img).convert("RGB")
-
-    pair_w = src_pil.width + gutter + cf_pil.width
-    pair_h = max(src_pil.height, cf_pil.height)
-
-    pair_img = Image.new("RGB", (pair_w, pair_h), "white")
-    pair_img.paste(src_pil, (0, 0))
-    pair_img.paste(cf_pil, (src_pil.width + gutter, 0))
+    diff_pil, diff_vmax = _make_diff_heatmap(src_img, cf_img)
 
     font = ImageFont.load_default()
 
-    left_text = _format_attr_block("input", pa_src, idx, parents)
-    right_text = _format_attr_block("cf", pa_cf, idx, parents)
+    title_left = "input"
+    title_mid = "cf"
+    title_right = "difference (cf - input)"
+
+    text_left = _format_attr_block("attrs", pa_src, idx, parents)
+    text_mid = _format_attr_block("attrs", pa_cf, idx, parents)
+    text_right = (
+        "heatmap\n"
+        "red: cf > input\n"
+        "blue: cf < input\n"
+        f"max|diff|={diff_vmax:.3f}"
+    )
 
     probe = Image.new("RGB", (10, 10), "white")
     draw_probe = ImageDraw.Draw(probe)
 
-    left_bbox = draw_probe.multiline_textbbox((0, 0), left_text, font=font, spacing=2)
-    right_bbox = draw_probe.multiline_textbbox((0, 0), right_text, font=font, spacing=2)
+    def text_size(txt: str) -> tuple[int, int]:
+        bbox = draw_probe.multiline_textbbox((0, 0), txt, font=font, spacing=2)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
-    left_h = left_bbox[3] - left_bbox[1]
-    right_h = right_bbox[3] - right_bbox[1]
-    text_h = max(left_h, right_h) + 2 * pad
+    col_w = max(src_pil.width, cf_pil.width, diff_pil.width)
 
-    canvas = Image.new("RGB", (pair_w, pair_h + text_h), "white")
-    canvas.paste(pair_img, (0, 0))
+    _, title_h_left = text_size(title_left)
+    _, title_h_mid = text_size(title_mid)
+    _, title_h_right = text_size(title_right)
+    title_h = max(title_h_left, title_h_mid, title_h_right)
 
+    _, text_h_left = text_size(text_left)
+    _, text_h_mid = text_size(text_mid)
+    _, text_h_right = text_size(text_right)
+    text_h = max(text_h_left, text_h_mid, text_h_right)
+
+    img_h = max(src_pil.height, cf_pil.height, diff_pil.height)
+
+    total_w = col_w * 3 + gutter * 2 + pad * 2
+    total_h = pad + title_h + pad + img_h + pad + text_h + pad
+
+    canvas = Image.new("RGB", (total_w, total_h), "white")
     draw = ImageDraw.Draw(canvas)
-    draw.multiline_text(
-        (pad, pair_h + pad),
-        left_text,
-        fill="black",
-        font=font,
-        spacing=2,
-    )
-    draw.multiline_text(
-        (src_pil.width + gutter + pad, pair_h + pad),
-        right_text,
-        fill="black",
-        font=font,
-        spacing=2,
-    )
+
+    cols_x = [
+        pad,
+        pad + col_w + gutter,
+        pad + 2 * (col_w + gutter),
+    ]
+
+    titles = [title_left, title_mid, title_right]
+    images = [src_pil, cf_pil, diff_pil]
+    texts = [text_left, text_mid, text_right]
+
+    for x0, title, img, txt in zip(cols_x, titles, images, texts):
+        title_bbox = draw.multiline_textbbox((0, 0), title, font=font, spacing=2)
+        title_w = title_bbox[2] - title_bbox[0]
+        draw.multiline_text(
+            (x0 + (col_w - title_w) // 2, pad),
+            title,
+            fill="black",
+            font=font,
+            spacing=2,
+        )
+
+        img_x = x0 + (col_w - img.width) // 2
+        img_y = pad + title_h + pad
+        canvas.paste(img, (img_x, img_y))
+
+        draw.multiline_text(
+            (x0, img_y + img_h + pad),
+            txt,
+            fill="black",
+            font=font,
+            spacing=2,
+        )
+
     return canvas
 
 
@@ -580,7 +678,7 @@ def save_counterfactual_samples(
         save_image(src_vis[i], save_dirs["inputs"] / f"{idx:06d}_input.png")
         save_image(cf_vis[i], save_dirs["cfs"] / f"{idx:06d}_cf.png")
 
-        pair_img = _render_pair_with_subtitles(
+        viz_img = _render_cf_visual_with_diff(
             src_img=src_vis[i],
             cf_img=cf_vis[i],
             pa_src=pa_src,
@@ -588,7 +686,7 @@ def save_counterfactual_samples(
             idx=i,
             parents=parents,
         )
-        pair_img.save(save_dirs["cf_visuals"] / f"{idx:06d}_pair.png")
+        viz_img.save(save_dirs["cf_visuals"] / f"{idx:06d}_viz.png")
 
 
 def main():
@@ -598,7 +696,7 @@ def main():
     parser.add_argument("--num_samples", type=int, default=32)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--split", type=str, default="valid", choices=["train", "valid", "test"])
+    parser.add_argument("--split", type=str, default="test", choices=["train", "valid", "test"])
     parser.add_argument("--use_ema", action="store_true", default=False)
 
     parser.add_argument(
@@ -630,6 +728,12 @@ def main():
     parser.add_argument("--ode_method", type=str, default="dopri5")
     parser.add_argument("--ode_atol", type=float, default=1e-5)
     parser.add_argument("--ode_rtol", type=float, default=1e-5)
+    parser.add_argument(
+        "--ode_steps",
+        type=int,
+        default=None,
+        help="Number of intervals on [0,1] for the external time grid. Especially useful for fixed-step solvers.",
+    )
 
     args = parser.parse_args()
 
@@ -661,6 +765,7 @@ def main():
             ode_method=args.ode_method,
             ode_atol=args.ode_atol,
             ode_rtol=args.ode_rtol,
+            ode_steps=args.ode_steps,
         )
         save_dir.mkdir(parents=True, exist_ok=True)
         cf_save_dirs = None
@@ -674,6 +779,7 @@ def main():
             ode_method=args.ode_method,
             ode_atol=args.ode_atol,
             ode_rtol=args.ode_rtol,
+            ode_steps=args.ode_steps,
         )
         save_dir = cf_save_dirs["root"]
         for d in cf_save_dirs.values():
@@ -706,6 +812,7 @@ def main():
         "ode_method": args.ode_method,
         "ode_atol": args.ode_atol,
         "ode_rtol": args.ode_rtol,
+        "ode_steps": args.ode_steps,
     }
     with open(save_dir / "sampling_args.json", "w") as f:
         json.dump(meta, f, indent=2)
@@ -741,6 +848,7 @@ def main():
                 ode_method=args.ode_method,
                 ode_atol=args.ode_atol,
                 ode_rtol=args.ode_rtol,
+                ode_steps=args.ode_steps,
             )
 
             save_random_samples(samples, save_dir, produced)
@@ -783,6 +891,7 @@ def main():
                 ode_method=args.ode_method,
                 ode_atol=args.ode_atol,
                 ode_rtol=args.ode_rtol,
+                ode_steps=args.ode_steps,
             )
 
             x_cf = generate_from_inverted_noise(
@@ -792,6 +901,7 @@ def main():
                 ode_method=args.ode_method,
                 ode_atol=args.ode_atol,
                 ode_rtol=args.ode_rtol,
+                ode_steps=args.ode_steps,
             )
 
             save_counterfactual_samples(

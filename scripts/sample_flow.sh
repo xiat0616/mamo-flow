@@ -1,12 +1,9 @@
 #!/bin/bash
-
-set -euo pipefail
-
 exp_name="mammo256_loki_flow_embed_256_192_condemb_per_attr_mchannel_64_puncond_0.2"
 ckpt_file="best_checkpoint.pt"
-mode="${1:?Please provide mode: random or cf}" # random or cf
-do_key="${2:-none}" # for cf key: view, cview, density
-do_mode="${3:-flip}" # for cf mode: flip, null, or random
+mode="${1:?Please provide mode: random or cf}"   # random or cf
+do_key="${2:-none}"                              # for cf key: view, cview, density
+do_mode="${3:-flip}"                             # for cf mode: flip, null, or random
 
 project_root="/vol/biomedic3/tx1215/mamo-flow"
 save_root="${project_root}/sampling_results"
@@ -20,8 +17,8 @@ fi
 # ----------------------------
 # Sampling config
 # ----------------------------
-num_samples=32
-batch_size=16
+num_samples=16
+batch_size=4
 split="test"
 use_ema=1
 cond_source="dataset"
@@ -29,9 +26,29 @@ cond_source="dataset"
 ode_method="dopri5"
 ode_atol="1e-5"
 ode_rtol="1e-5"
+ode_steps=""   # e.g. 100 ; leave empty to match Python's None
+
+# ----------------------------
+# Helper: match Python _format_float_tag()
+# ----------------------------
+format_float_tag() {
+    python - "$1" <<'PY'
+import sys
+x = float(sys.argv[1])
+s = f"{x:.0e}"
+s = s.replace("e-0", "e-").replace("e+0", "e+")
+print(s)
+PY
+}
+
+ode_atol_tag="$(format_float_tag "$ode_atol")"
+ode_rtol_tag="$(format_float_tag "$ode_rtol")"
 
 ckpt_tag="${ckpt_file%.*}"
-sampler_tag="ode-${ode_method}_atol-${ode_atol}_rtol-${ode_rtol}"
+sampler_tag="ode-${ode_method}_atol-${ode_atol_tag}_rtol-${ode_rtol_tag}"
+if [ -n "$ode_steps" ]; then
+    sampler_tag="${sampler_tag}_steps-${ode_steps}"
+fi
 
 if [ "$mode" = "random" ]; then
     cond_tag="cond_dataset"
@@ -66,6 +83,10 @@ ARGS=(
     --cond_source="$cond_source"
 )
 
+if [ -n "$ode_steps" ]; then
+    ARGS+=(--ode_steps="$ode_steps")
+fi
+
 if [ "$use_ema" = "1" ]; then
     ARGS+=(--use_ema)
 fi
@@ -89,6 +110,5 @@ source ~/.bashrc
 
 nvidia-smi
 
-uv run python -m src.sampling.sample_flow ${ARGS[@]} \
-    | tee "${run_dir}/sample.log"
+uv run python -m src.sampling.sample_flow ${ARGS[@]} | tee "${run_dir}/sample.log"
 EOF
