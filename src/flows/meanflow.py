@@ -186,7 +186,9 @@ class MeanFlow(nn.Module):
 
         if self.training and hasattr(self.forward_nn, "normalize_weights"):
             self.forward_nn.normalize_weights()
-
+        
+        # Sacrificing some efficiency by doing two separate forward passes to save memory,
+        # since the JVP requires retaining intermediate activations for z_t, r, t.
         u = self._net_call(z_t, r, t, cond_emb)
 
         def _fn(z_: Tensor, r_: Tensor, t_: Tensor) -> Tensor:
