@@ -111,7 +111,8 @@ def build_dataloaders_from_train_args(
     dataloaders = get_dataloaders(
         DataLoaderConfig(
             bs=batch_size,
-            num_workers=getattr(train_args, "num_workers", 4),
+            # num_workers=getattr(train_args, "num_workers", 4),
+            num_workers=4,
             prefetch_factor=getattr(train_args, "prefetch_factor", 2),
             seed=getattr(train_args, "seed", 0),
             resume_step=0,
@@ -295,8 +296,16 @@ def apply_single_intervention(
 
         rand_idx = _as_index_tensor(pa_rand[do_key]).clamp(min=0, max=num_classes - 1)
         same = rand_idx == orig_idx
+
         if same.any():
-            rand_idx[same] = (orig_idx[same] + 1) % num_classes
+            num_same = int(same.sum().item())
+            rand_offset = torch.randint(
+                low=1,
+                high=num_classes,
+                size=(num_same,),
+                device=orig_idx.device,
+            )
+            rand_idx[same] = (orig_idx[same] + rand_offset) % num_classes
 
         pa_cf[do_key] = rand_idx.to(ref.dtype).view_as(ref)
         return pa_cf
@@ -399,14 +408,14 @@ def get_sampler_tag(
     ode_rtol: float,
     ode_steps: int | None,
 ) -> str:
-    base = (
+    if ode_steps is not None:
+        return f"ode-{ode_method}_steps-{ode_steps}"
+
+    return (
         f"ode-{ode_method}"
         f"_atol-{_format_float_tag(ode_atol)}"
         f"_rtol-{_format_float_tag(ode_rtol)}"
     )
-    if ode_steps is not None:
-        base += f"_steps-{ode_steps}"
-    return base
 
 
 def build_sampling_root(
@@ -810,10 +819,11 @@ def main():
         "do_key": args.do_key,
         "do_mode": args.do_mode,
         "ode_method": args.ode_method,
-        "ode_atol": args.ode_atol,
-        "ode_rtol": args.ode_rtol,
+        "ode_atol": None if args.ode_steps is not None else args.ode_atol,
+        "ode_rtol": None if args.ode_steps is not None else args.ode_rtol,
         "ode_steps": args.ode_steps,
     }
+
     with open(save_dir / "sampling_args.json", "w") as f:
         json.dump(meta, f, indent=2)
 
