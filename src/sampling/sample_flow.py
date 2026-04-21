@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from PIL import Image, ImageDraw, ImageFont
 from matplotlib import colormaps
+import matplotlib.pyplot as plt
 from torchvision.transforms.functional import to_pil_image
 from torchvision.utils import save_image
 
@@ -438,7 +439,7 @@ def build_sampling_root(
     return Path(save_root) / exp_name / ckpt_tag / sampler_tag
 
 
-def build_random_save_dir(
+def build_random_save_dirs(
     save_root: str,
     ckpt_path: str,
     train_args: argparse.Namespace,
@@ -447,7 +448,7 @@ def build_random_save_dir(
     ode_atol: float,
     ode_rtol: float,
     ode_steps: int | None,
-) -> Path:
+) -> dict[str, Path]:
     root = build_sampling_root(
         save_root=save_root,
         ckpt_path=ckpt_path,
@@ -458,7 +459,12 @@ def build_random_save_dir(
         ode_steps=ode_steps,
     )
     cond_tag = "cond_dataset" if cond_source == "dataset" else "uncond"
-    return root / "randoms" / cond_tag
+    random_root = root / "randoms" / cond_tag
+    return {
+        "root": random_root,
+        "rs": random_root / "rs",
+        "rs_visual": random_root / "rs_visual",
+    }
 
 
 def build_cf_save_dirs(
@@ -534,6 +540,83 @@ def _format_attr_block(
     for start in range(0, len(items), items_per_line):
         lines.append(" | ".join(items[start:start + items_per_line]))
     return "\n".join(lines)
+
+
+def _format_random_hparam_title(
+    meta: dict,
+    global_idx: int,
+) -> str:
+    return (
+        f"random sample #{global_idx:06d}\n"
+        f"mode={meta['mode']} | cond_source={meta['cond_source']}"
+    )
+
+
+def _format_random_hparam_xlabel(meta: dict) -> str:
+    if meta["ode_steps"] is not None:
+        solver = f"solver={meta['ode_method']} | steps={meta['ode_steps']}"
+    else:
+        solver = (
+            f"solver={meta['ode_method']} | "
+            f"atol={meta['ode_atol']:.1e} | rtol={meta['ode_rtol']:.1e}"
+        )
+
+    run_cfg = (
+        f"split={meta['split']} | batch_size={meta['batch_size']} | "
+        f"seed={meta['seed']} | use_ema={meta['use_ema']}"
+    )
+    return f"{solver}\n{run_cfg}"
+
+
+def _format_random_hparam_ylabel(
+    pa: dict[str, torch.Tensor] | None,
+    idx: int,
+    parents: list[str],
+) -> str:
+    if pa is None:
+        return "conditioning\nnone (unconditional)"
+
+    return _format_attr_block(
+        title="conditioning",
+        pa=pa,
+        idx=idx,
+        parents=parents,
+        items_per_line=2,
+    )
+
+
+def _save_random_visual(
+    img: torch.Tensor,
+    save_path: Path,
+    pa: dict[str, torch.Tensor] | None,
+    idx: int,
+    global_idx: int,
+    parents: list[str],
+    meta: dict,
+) -> None:
+    title = _format_random_hparam_title(meta, global_idx)
+    xlabel = _format_random_hparam_xlabel(meta)
+    ylabel = _format_random_hparam_ylabel(pa, idx, parents)
+
+    img_np = img.detach().cpu().float().numpy()
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    if img_np.ndim == 3 and img_np.shape[0] == 1:
+        ax.imshow(img_np[0], cmap="gray", vmin=0.0, vmax=1.0)
+    elif img_np.ndim == 3:
+        ax.imshow(np.transpose(img_np, (1, 2, 0)))
+    else:
+        ax.imshow(img_np, cmap="gray", vmin=0.0, vmax=1.0)
+
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel(xlabel, fontsize=8)
+    ax.set_ylabel(ylabel, fontsize=8, rotation=0, labelpad=55, va="center")
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
 
 
 def _make_diff_heatmap(
@@ -655,15 +738,30 @@ def _render_cf_visual_with_diff(
 
 def save_random_samples(
     samples: torch.Tensor,
-    save_dir: Path,
+    save_dirs: dict[str, Path],
     start_idx: int,
+    pa: dict[str, torch.Tensor] | None,
+    parents: list[str],
+    meta: dict,
 ) -> None:
-    save_dir.mkdir(parents=True, exist_ok=True)
+    for d in save_dirs.values():
+        d.mkdir(parents=True, exist_ok=True)
 
     vis = ((samples.clamp(-1, 1) + 1.0) / 2.0).cpu()
+    pa_cpu = None if pa is None else {k: v.detach().cpu() for k, v in pa.items()}
+
     for i in range(vis.shape[0]):
         idx = start_idx + i
-        save_image(vis[i], save_dir / f"{idx:06d}_rand.png")
+        save_image(vis[i], save_dirs["rs"] / f"{idx:06d}_rand.png")
+        _save_random_visual(
+            img=vis[i],
+            save_path=save_dirs["rs_visual"] / f"{idx:06d}_viz.png",
+            pa=pa_cpu,
+            idx=i,
+            global_idx=idx,
+            parents=parents,
+            meta=meta,
+        )
 
 
 def save_counterfactual_samples(
@@ -766,7 +864,7 @@ def main():
     model.eval()
 
     if args.mode == "random":
-        save_dir = build_random_save_dir(
+        random_save_dirs = build_random_save_dirs(
             save_root=args.save_dir,
             ckpt_path=args.ckpt,
             train_args=train_args,
@@ -776,7 +874,9 @@ def main():
             ode_rtol=args.ode_rtol,
             ode_steps=args.ode_steps,
         )
-        save_dir.mkdir(parents=True, exist_ok=True)
+        save_dir = random_save_dirs["root"]
+        for d in random_save_dirs.values():
+            d.mkdir(parents=True, exist_ok=True)
         cf_save_dirs = None
     elif args.mode == "cf":
         cf_save_dirs = build_cf_save_dirs(
@@ -793,6 +893,7 @@ def main():
         save_dir = cf_save_dirs["root"]
         for d in cf_save_dirs.values():
             d.mkdir(parents=True, exist_ok=True)
+        random_save_dirs = None
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
@@ -861,7 +962,14 @@ def main():
                 ode_steps=args.ode_steps,
             )
 
-            save_random_samples(samples, save_dir, produced)
+            save_random_samples(
+                samples=samples,
+                save_dirs=random_save_dirs,
+                start_idx=produced,
+                pa=pa,
+                parents=train_args.parents,
+                meta=meta,
+            )
             produced += bs
             print(f"Saved {produced}/{args.num_samples} random samples to {save_dir}")
 
