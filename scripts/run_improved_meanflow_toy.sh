@@ -15,7 +15,7 @@ cond_embed_dim=160
 p_uncond=0.2
 
 epochs=10000
-bs=32
+bs=160
 lr=1e-4
 
 # ----------------------------
@@ -98,7 +98,7 @@ ARGS=(
     --clip_act=256
 )
 
-NPROC_PER_NODE=6
+NPROC_PER_NODE=2
 
 #SBATCH --nodelist=mira05
 
