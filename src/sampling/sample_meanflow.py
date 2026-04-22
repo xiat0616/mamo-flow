@@ -738,6 +738,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", type=str, required=True)
     parser.add_argument("--save_dir", type=str, required=True)
+    parser.add_argument("--split_dir", type=str, default=None,
+                        help="Override the split_dir stored in the checkpoint.")
     parser.add_argument("--num_samples", type=int, default=32)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
@@ -817,6 +819,8 @@ def main():
 
     ckpt = torch.load(args.ckpt, map_location="cpu")
     train_args = to_namespace(ckpt["args"])
+    if args.split_dir is not None:
+        train_args.split_dir = args.split_dir
 
     model = build_meanflow_model_from_ckpt_args(train_args, device)
     model.load_state_dict(ckpt["model_state_dict"], strict=True)

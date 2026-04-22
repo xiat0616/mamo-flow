@@ -37,12 +37,11 @@ exp_name="${base_name}_meanflow_embed_${img_height}_${img_width}_condemb_${cond_
 mkdir -p ../checkpoints
 mkdir -p "../checkpoints/$exp_name"
 
-split_dir="/vol/biomedic3/tx1215/mamo-flow/assets/splits"
 
 ARGS=(
 # DATA
     --data_dir="/vol/biodata/data/Mammo/EMBED/pngs/1024x768"
-    --split_dir="$split_dir"
+    --split_dir="/vol/biomedic3/tx1215/mamo-flow/assets/embed_splits_v1"
     --save_dir="./checkpoints/$exp_name"
     --parents age view density scanner cview
     --img_height="$img_height"

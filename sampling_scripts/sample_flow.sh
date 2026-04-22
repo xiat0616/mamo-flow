@@ -8,6 +8,7 @@ do_mode="${3:-flip}"                             # for cf mode: flip, null, or r
 project_root="/vol/biomedic3/tx1215/mamo-flow"
 save_root="${project_root}/sampling_results"
 ckpt="${project_root}/checkpoints/${exp_name}/${ckpt_file}"
+split_dir="${project_root}/assets/splits"
 
 if [ ! -f "$ckpt" ]; then
     echo "Checkpoint not found: $ckpt"
@@ -80,6 +81,7 @@ mkdir -p "$run_dir"
 ARGS=(
     --ckpt "$ckpt"
     --save_dir "$save_root"
+    --split_dir "$split_dir"
     --num_samples "$num_samples"
     --batch_size "$batch_size"
     --seed 0
