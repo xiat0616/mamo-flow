@@ -174,6 +174,7 @@ export OMP_NUM_THREADS=${NPROC_PER_NODE}
 export TQDM_MININTERVAL=300
 export MASTER_ADDR=\$(scontrol show hostnames "\$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=\$(shuf -i 10001-29500 -n 1)
+export NCCL_P2P_DISABLE=1
 
 srun uv run torchrun \
     --nnodes=1 \
