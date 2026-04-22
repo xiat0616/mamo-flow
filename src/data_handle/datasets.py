@@ -33,6 +33,7 @@ class DatasetConfig:
     data_dir: str | None = None
     csv_filepath: str | None = None
     cache_dir: str | None = None
+    split_dir: str | None = None   # NEW
     parents: list[str] = field(default_factory=list)
     domain: list[str] | None = None
     scanner_model: list[str] | None = None
@@ -46,7 +47,6 @@ class DatasetConfig:
     img_width: int = 384
     img_channels: int = 1
     vae_ckpt: str | None = None
-
 DEFAULT_EMBED_ROOT = Path("/vol/biodata/data/Mammo/EMBED/")
 DEFAULT_IMAGE_ROOT = DEFAULT_EMBED_ROOT / "pngs/1024x768"
 
