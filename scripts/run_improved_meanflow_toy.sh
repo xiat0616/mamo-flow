@@ -15,7 +15,7 @@ cond_embed_dim=160
 p_uncond=0.2
 
 epochs=10000
-bs=48
+bs=32
 lr=1e-4
 
 # ----------------------------
@@ -98,7 +98,7 @@ ARGS=(
     --clip_act=256
 )
 
-NPROC_PER_NODE=2
+NPROC_PER_NODE=6
 
 #SBATCH --nodelist=mira05
 
@@ -155,6 +155,35 @@ srun uv run torchrun \
     --rdzv_endpoint="\$MASTER_ADDR:\$MASTER_PORT" \
     -m src.training.train_improved_meanflow ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
 EOF
+
+
+elif [ "$2" = "gpus" ]; then
+    sbatch <<EOF
+#!/bin/bash
+#SBATCH --partition=gpus
+#SBATCH --gres=gpu:${NPROC_PER_NODE}
+#SBATCH --nodelist=lory
+#SBATCH --output=../checkpoints/$exp_name/slurm.%j.log
+
+cd /vol/biomedic3/tx1215/mamo-flow
+uv sync --frozen
+source ~/.bashrc
+
+nvidia-smi
+export OMP_NUM_THREADS=${NPROC_PER_NODE}
+export TQDM_MININTERVAL=300
+export MASTER_ADDR=\$(scontrol show hostnames "\$SLURM_JOB_NODELIST" | head -n 1)
+export MASTER_PORT=\$(shuf -i 10001-29500 -n 1)
+
+srun uv run torchrun \
+    --nnodes=1 \
+    --nproc_per_node=${NPROC_PER_NODE} \
+    --rdzv_id="\$SLURM_JOB_ID" \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint="\$MASTER_ADDR:\$MASTER_PORT" \
+    -m src.training.train_improved_meanflow ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
+EOF
+
 
 else
     NPROC_PER_NODE=8

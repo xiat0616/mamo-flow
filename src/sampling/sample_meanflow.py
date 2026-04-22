@@ -21,6 +21,7 @@ from src.models.embedder import (
     GlobalCondEmbedder,
     PerAttrCondEmbedder,
     CondEmbedderConfig,
+    infer_parent_dims_from_batch,
 )
 from src.models.unet import UNet
 from src.flows.meanflow import (
@@ -37,18 +38,6 @@ DENSITY_LABELS = {0: "A", 1: "B", 2: "C", 3: "D"}
 VIEW_LABELS = {0: "MLO", 1: "CC"}
 CVIEW_LABELS = {0: "2D", 1: "CView"}
 
-
-def infer_parent_dims_from_batch(
-    pa: dict[str, torch.Tensor],
-    parents: list[str],
-) -> dict[str, int]:
-    parent_dims: dict[str, int] = {}
-    for k in parents:
-        if k not in pa:
-            raise KeyError(f"Parent '{k}' not found in batch['pa']")
-        v = pa[k]
-        parent_dims[k] = 1 if v.ndim == 1 else int(v.shape[1])
-    return parent_dims
 
 
 def to_namespace(d: dict) -> argparse.Namespace:
@@ -258,6 +247,8 @@ def _schema_num_classes(do_key: str) -> int | None:
 
 
 def _as_index_tensor(x: torch.Tensor) -> torch.Tensor:
+    if x.shape[-1] > 1:  # one-hot encoded
+        return x.argmax(dim=-1)
     return x.view(-1).round().long()
 
 
@@ -293,13 +284,20 @@ def apply_single_intervention(
 
     orig_idx = _as_index_tensor(ref)
 
+    def _to_pa(new_idx: torch.Tensor) -> torch.Tensor:
+        if ref.shape[-1] > 1:  # one-hot
+            one_hot = torch.zeros_like(ref)
+            one_hot.scatter_(-1, new_idx.unsqueeze(-1), 1.0)
+            return one_hot
+        return new_idx.to(ref.dtype).view_as(ref)
+
     if do_mode == "flip":
         if num_classes == 2:
             new_idx = 1 - orig_idx
         else:
             new_idx = (orig_idx + 1) % num_classes
 
-        pa_cf[do_key] = new_idx.to(ref.dtype).view_as(ref)
+        pa_cf[do_key] = _to_pa(new_idx)
         return pa_cf
 
     if do_mode == "random":
@@ -311,7 +309,7 @@ def apply_single_intervention(
         if same.any():
             rand_idx[same] = (orig_idx[same] + 1) % num_classes
 
-        pa_cf[do_key] = rand_idx.to(ref.dtype).view_as(ref)
+        pa_cf[do_key] = _to_pa(rand_idx)
         return pa_cf
 
     raise ValueError(f"Unknown do_mode: {do_mode}")
@@ -544,9 +542,10 @@ def _get_pa_scalar(pa: dict[str, torch.Tensor], key: str, idx: int) -> float:
     v = pa[key]
     if v.ndim == 0:
         return float(v.detach().cpu().item())
-    if v.ndim == 1:
-        return float(v[idx].detach().cpu().item())
-    return float(v[idx, 0].detach().cpu().item())
+    vi = v[idx]
+    if vi.numel() > 1:  # one-hot encoded
+        return float(vi.argmax().item())
+    return float(vi.item())
 
 
 def _format_pa_value(key: str, value: float) -> str:
