@@ -255,19 +255,11 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     parser.add_argument("--dataset", type=str, default=None)
     parser.add_argument("--data_dir", type=str, default=None)
-    parser.add_argument("--csv_filepath", type=str, default=None)
+    parser.add_argument("--split_dir", type=str, required=True)
     parser.add_argument("--cache_dir", type=str, default=None)
     parser.add_argument("--save_dir", type=str, default=None)
     parser.add_argument("--vae_ckpt", type=str, default=None)
     parser.add_argument("--parents", nargs="+", type=str, default=list(CLASS_SCHEMA))
-    parser.add_argument("--domain", nargs="+", type=str, default=None)
-    parser.add_argument("--scanner_model", nargs="+", type=str, default=None)
-    parser.add_argument("--exclude_cviews", type=int, default=1)
-    parser.add_argument("--hold_out_model_5", type=int, default=1)
-    parser.add_argument("--prop_train", type=float, default=1.0)
-    parser.add_argument("--valid_frac", type=float, default=0.125)
-    parser.add_argument("--test_frac", type=float, default=0.125)
-    parser.add_argument("--split_seed", type=int, default=33)
     parser.add_argument("--img_height", type=int, default=512)
     parser.add_argument("--img_width", type=int, default=384)
     parser.add_argument("--img_channels", type=int, default=1)
@@ -393,17 +385,9 @@ if __name__ == "__main__":
     datasets = get_embed(
         DatasetConfig(
             data_dir=args.data_dir,
-            csv_filepath=args.csv_filepath,
+            split_dir=args.split_dir,
             cache_dir=args.cache_dir,
             parents=args.parents,
-            domain=args.domain,
-            scanner_model=args.scanner_model,
-            exclude_cviews=args.exclude_cviews,
-            hold_out_model_5=args.hold_out_model_5,
-            prop_train=args.prop_train,
-            valid_frac=args.valid_frac,
-            test_frac=args.test_frac,
-            split_seed=args.split_seed,
             img_height=args.img_height,
             img_width=args.img_width,
             img_channels=args.img_channels,

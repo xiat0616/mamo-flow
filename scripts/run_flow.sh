@@ -20,18 +20,14 @@ exp_name="${base_name}_flow_embed_${img_height}_${img_width}_condemb_${cond_embe
 mkdir -p ../checkpoints
 mkdir -p "../checkpoints/$exp_name"   # must be unique
 
+split_dir="/vol/biomedic3/tx1215/mamo-flow/assets/splits"
+
 ARGS=(
 # DATA
     --data_dir="/vol/biodata/data/Mammo/EMBED/pngs/1024x768"
-    --csv_filepath="/vol/biomedic3/tx1215/mamo-flow/assets/EMBED_meta.csv"
+    --split_dir="$split_dir"
     --save_dir="./checkpoints/$exp_name"
     --parents age view density scanner cview
-    --exclude_cviews=1
-    --hold_out_model_5=1
-    --prop_train=1.0
-    --valid_frac=0.075
-    --test_frac=0.125
-    --split_seed=33
     --img_height=$img_height
     --img_width=$img_width
     --img_channels=$img_channels

@@ -84,17 +84,9 @@ def build_dataloaders_from_train_args(
     datasets = get_embed(
         DatasetConfig(
             data_dir=train_args.data_dir,
-            csv_filepath=train_args.csv_filepath,
+            split_dir=train_args.split_dir,
             cache_dir=getattr(train_args, "cache_dir", None),
             parents=train_args.parents,
-            domain=getattr(train_args, "domain", None),
-            scanner_model=getattr(train_args, "scanner_model", None),
-            exclude_cviews=getattr(train_args, "exclude_cviews", 1),
-            hold_out_model_5=getattr(train_args, "hold_out_model_5", 1),
-            prop_train=getattr(train_args, "prop_train", 1.0),
-            valid_frac=getattr(train_args, "valid_frac", 0.125),
-            test_frac=getattr(train_args, "test_frac", 0.125),
-            split_seed=getattr(train_args, "split_seed", 33),
             img_height=train_args.img_height,
             img_width=train_args.img_width,
             img_channels=train_args.img_channels,
