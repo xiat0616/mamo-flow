@@ -30,21 +30,6 @@ def parse_hw(s: str) -> tuple[int, int]:
         ) from e
 
 
-def infer_parent_dims_from_batch(
-    pa: dict[str, torch.Tensor],
-    parents: list[str],
-) -> dict[str, int]:
-    parent_dims: dict[str, int] = {}
-    for k in parents:
-        if k not in pa:
-            raise KeyError(f"Parent '{k}' not found in batch['pa']")
-        v = pa[k]
-        if v.ndim == 1:
-            parent_dims[k] = 1
-        else:
-            parent_dims[k] = int(v.shape[1])
-    return parent_dims
-
 
 class Trainer:
     def __init__(
@@ -362,6 +347,7 @@ if __name__ == "__main__":
             GlobalCondEmbedder,
             PerAttrCondEmbedder,
             CondEmbedderConfig,
+            infer_parent_dims_from_batch,
         )
         from src.flows.flow import BlockConfig, Flow, UNetConfig
         from src.models.unet import UNet

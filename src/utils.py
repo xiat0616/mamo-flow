@@ -255,7 +255,19 @@ def value_to_name(
 
     for k, v in pa.items():
         for i in range(v.shape[0]):
-            val = _scalar(v[i])
+            vi = v[i]
+            is_onehot = vi.numel() > 1
+
+            if is_onehot:
+                idx = int(vi.argmax().item())
+                if k in idx_to_name:
+                    names = idx_to_name[k]
+                    out[k].append(names[idx] if 0 <= idx < len(names) else str(idx))
+                else:
+                    out[k].append(str(idx))
+                continue
+
+            val = _scalar(vi)
 
             if k == "age":
                 out[k].append("nan" if _is_nan(val) else str(int(round(val * 100))))
@@ -406,19 +418,26 @@ def _sample_random_interventions(
         if is_categorical:
             num_classes = int(schema_val)
             if num_classes <= 1:
-                do_y = y.clone()
+                do_pa[k][i] = y.clone()
             else:
-                do_y = torch.randint(0, num_classes, y.shape, device=y.device)
+                is_onehot = y.shape[-1] > 1
+                orig_idx = int(y.argmax().item()) if is_onehot else int(y.round().item())
+
+                new_idx = random.randrange(num_classes)
                 tries = 0
-                while (do_y == y).any() and tries < 32:
-                    do_y = torch.randint(0, num_classes, y.shape, device=y.device)
+                while new_idx == orig_idx and tries < 32:
+                    new_idx = random.randrange(num_classes)
                     tries += 1
+                if new_idx == orig_idx:
+                    new_idx = (orig_idx + 1) % num_classes
 
-                if (do_y == y).any():
-                    do_y = (y.long() + 1) % num_classes
-                    do_y = do_y.to(y.dtype)
+                if is_onehot:
+                    do_y = torch.zeros_like(y)
+                    do_y[new_idx] = 1.0
+                else:
+                    do_y = torch.tensor(new_idx, dtype=y.dtype, device=y.device)
 
-            do_pa[k][i] = do_y
+                do_pa[k][i] = do_y
         else:
             do_pa[k][i] = torch.rand_like(do_pa[k][i])
 

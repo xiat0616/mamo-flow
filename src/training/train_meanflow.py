@@ -36,18 +36,6 @@ def parse_hw(s: str) -> tuple[int, int]:
         ) from e
 
 
-def infer_parent_dims_from_batch(
-    pa: dict[str, torch.Tensor],
-    parents: list[str],
-) -> dict[str, int]:
-    parent_dims: dict[str, int] = {}
-    for k in parents:
-        if k not in pa:
-            raise KeyError(f"Parent '{k}' not found in batch['pa']")
-        v = pa[k]
-        parent_dims[k] = 1 if v.ndim == 1 else int(v.shape[1])
-    return parent_dims
-
 
 class Trainer:
     def __init__(
@@ -71,7 +59,7 @@ class Trainer:
         self.rank = dist.get_rank() if self.is_dist else 0
         self.step, self.epoch = 0, 0
         self.best_loss = 1e6
-        self.eval_mc = 8
+        self.eval_mc = 4
         self.tqdm_kwargs = dict(
             disable=(self.rank != 0),
             mininterval=float(os.environ.get("TQDM_MININTERVAL", 1)),
@@ -429,6 +417,7 @@ if __name__ == "__main__":
             GlobalCondEmbedder,
             PerAttrCondEmbedder,
             CondEmbedderConfig,
+            infer_parent_dims_from_batch,
         )
         from src.models.unet_mf import UNet
         from src.flows.meanflow import BlockConfig, MeanFlow, MeanFlowConfig, UNetConfig

@@ -396,7 +396,15 @@ class EMBED(torch.utils.data.Dataset):
         if self.transform is not None:
             image = self.transform(image)
 
-        pa = {k: torch.as_tensor(metadata[k], dtype=torch.float32).unsqueeze(0) for k in self.parents}
+        pa = {}
+        for k in self.parents:
+            spec = CLASS_SCHEMA.get(k)
+            if isinstance(spec, int) and spec > 0:
+                one_hot = torch.zeros(spec, dtype=torch.float32)
+                one_hot[int(metadata[k])] = 1.0
+                pa[k] = one_hot
+            else:
+                pa[k] = torch.as_tensor(metadata[k], dtype=torch.float32).unsqueeze(0)
 
         return dict(
             x=image,

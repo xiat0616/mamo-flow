@@ -15,7 +15,7 @@ cond_embed_dim=160
 p_uncond=0.2
 
 epochs=10000
-bs=32
+bs=16
 lr=1e-4
 
 # ----------------------------
@@ -126,11 +126,10 @@ srun uv run torchrun \
     -m src.training.train_meanflow ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
 EOF
 
-elif [ "$2" = "gpus" ]; then
+elif [ "$2" = "gpus24" ]; then
     sbatch <<EOF
 #!/bin/bash
 #SBATCH --partition=gpus24
-#SBATCH --nodelist=mira05
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
 #SBATCH --output=../checkpoints/$exp_name/slurm.%j.log
 
@@ -139,7 +138,7 @@ uv sync --frozen
 source ~/.bashrc
 
 nvidia-smi
-export OMP_NUM_THREADS=3
+export OMP_NUM_THREADS=${NPROC_PER_NODE}
 export TQDM_MININTERVAL=300
 export MASTER_ADDR=\$(scontrol show hostnames "\$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=\$(shuf -i 10001-29500 -n 1)

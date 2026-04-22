@@ -12,7 +12,7 @@ p_uncond=0.2
 # optional: other useful vars
 img_channels=1
 epochs=10000
-bs=48
+bs=24
 lr=1e-4
 
 exp_name="${base_name}_flow_embed_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
@@ -88,18 +88,19 @@ ARGS=(
 #SBATCH --nodelist=lora,luna
 #SBATCH --nodelist=monal04
 #SBATCH --exclude=loki
+#SBATCH --nodelist=mira01,loki
 
 NPROC_PER_NODE=2
 
 if [ "$2" = "gpus48" ]; then
     sbatch <<EOF
 #!/bin/bash
-source ~/.bashrc
 #SBATCH --partition=gpus48
-#SBATCH --nodelist=mira01
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
+#SBATCH --nodelist=mira01
 #SBATCH --output=../checkpoints/$exp_name/slurm.%j.log
 
+source ~/.bashrc
 cd /vol/biomedic3/tx1215/mamo-flow
 uv sync --frozen
 
@@ -119,20 +120,20 @@ srun uv run torchrun \
     -m src.training.train_flow ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
 EOF
 
-elif [ "$2" = "gpus" ]; then
+elif [ "$2" = "gpus24" ]; then
     sbatch <<EOF
 #!/bin/bash
-source ~/.bashrc
-#SBATCH --partition=gpus
+#SBATCH --partition=gpus24
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
 #SBATCH --output=../checkpoints/$exp_name/slurm.%j.log
 
+source ~/.bashrc
 cd /vol/biomedic3/tx1215/mamo-flow
 uv sync --frozen
 
 nvidia-smi
-export OMP_NUM_THREADS=3
-export TQDM_MININTERVAL=10
+export OMP_NUM_THREADS=${NPROC_PER_NODE}
+export TQDM_MININTERVAL=300
 export MASTER_ADDR=\$(scontrol show hostnames "\$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=\$(shuf -i 10001-29500 -n 1)
 

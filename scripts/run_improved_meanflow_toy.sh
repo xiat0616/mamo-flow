@@ -5,8 +5,8 @@ base_name="${1:-improved_meanflow}"
 # ----------------------------
 # Core experiment config
 # ----------------------------
-img_height=256
-img_width=192
+img_height=128
+img_width=96
 img_channels=1
 
 cond_embedder="per_attr"
@@ -15,7 +15,7 @@ cond_embed_dim=160
 p_uncond=0.2
 
 epochs=10000
-bs=32
+bs=48
 lr=1e-4
 
 # ----------------------------
@@ -84,7 +84,7 @@ ARGS=(
 # MODEL
     unet
     --model_channels="$model_channels"
-    --channel_mult 1 2 3 4 5
+    --channel_mult 1 2 3 4
     --cond_embed_dim="$cond_embed_dim"
     --num_blocks=3
     --attn_resolutions 16x12
