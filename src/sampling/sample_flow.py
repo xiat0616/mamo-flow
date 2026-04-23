@@ -882,8 +882,8 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        default="random",
-        choices=["random", "cf"],
+        default="rs",
+        choices=["rs", "cf"],
         help="random: sample from Gaussian noise; cf: generate counterfactuals from real images.",
     )
     parser.add_argument(
@@ -940,7 +940,7 @@ def main():
 
     class_schema = get_class_schema(train_args)
 
-    if args.mode == "random":
+    if args.mode == "rs":
         random_save_dirs = build_random_save_dirs(
             save_root=args.save_dir,
             ckpt_path=args.ckpt,
@@ -975,7 +975,7 @@ def main():
         raise ValueError(f"Unknown mode: {args.mode}")
 
     cond_iter = None
-    if args.mode == "random" and args.cond_source == "dataset":
+    if args.mode == "rs" and args.cond_source == "dataset":
         cond_iter = get_iterator(train_args, args.batch_size, args.split)
 
     src_iter = None
@@ -1009,7 +1009,7 @@ def main():
     while produced < args.num_samples:
         bs = min(args.batch_size, args.num_samples - produced)
 
-        if args.mode == "random":
+        if args.mode == "rs":
             noise = torch.randn(
                 bs,
                 train_args.img_channels,
