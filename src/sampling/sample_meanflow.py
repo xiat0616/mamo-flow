@@ -7,16 +7,10 @@ import torch
 import torch.nn as nn
 from PIL import Image, ImageDraw, ImageFont
 from matplotlib import colormaps
+import matplotlib.pyplot as plt
 from torchvision.transforms.functional import to_pil_image
 from torchvision.utils import save_image
 
-from src.data_handle.embed import (
-    CLASS_SCHEMA,
-    get_embed,
-    get_dataloaders,
-    DataLoaderConfig,
-    DatasetConfig,
-)
 from src.models.embedder import (
     GlobalCondEmbedder,
     PerAttrCondEmbedder,
@@ -37,7 +31,18 @@ from src.utils import ModelEMA, seed_all
 DENSITY_LABELS = {0: "A", 1: "B", 2: "C", 3: "D"}
 VIEW_LABELS = {0: "MLO", 1: "CC"}
 CVIEW_LABELS = {0: "2D", 1: "CView"}
-
+CIFAR10_LABELS = {
+    0: "airplane",
+    1: "automobile",
+    2: "bird",
+    3: "cat",
+    4: "deer",
+    5: "dog",
+    6: "frog",
+    7: "horse",
+    8: "ship",
+    9: "truck",
+}
 
 
 def to_namespace(d: dict) -> argparse.Namespace:
@@ -56,55 +61,111 @@ def _format_float_tag(x: float) -> str:
     return s
 
 
-def build_encode_time_grid(
+def build_time_grid(
+    direction: str,
     device: torch.device,
     ode_steps: int | None,
 ) -> torch.Tensor:
-    """
-    MeanFlow convention in your code:
-      z_t = (1 - t) * x + t * eps
-      t=0 -> data
-      t=1 -> noise
-
-    For inversion x -> noise we integrate from 0 to 1.
-    """
     if ode_steps is None:
-        return torch.tensor([0.0, 1.0], device=device)
+        if direction == "forward":
+            return torch.tensor([0.0, 1.0], device=device)
+        if direction == "backward":
+            return torch.tensor([1.0, 0.0], device=device)
+        raise ValueError(f"Unknown direction: {direction}")
 
     if ode_steps < 1:
         raise ValueError(f"ode_steps must be >= 1, got {ode_steps}")
 
-    return torch.linspace(0.0, 1.0, ode_steps + 1, device=device)
+    if direction == "forward":
+        return torch.linspace(0.0, 1.0, ode_steps + 1, device=device)
+    if direction == "backward":
+        return torch.linspace(1.0, 0.0, ode_steps + 1, device=device)
+    raise ValueError(f"Unknown direction: {direction}")
 
 
 def build_dataloaders_from_train_args(
     train_args: argparse.Namespace,
     batch_size: int,
 ) -> dict[str, torch.utils.data.DataLoader]:
-    datasets = get_embed(
-        DatasetConfig(
-            data_dir=train_args.data_dir,
-            split_dir=train_args.split_dir,
-            cache_dir=getattr(train_args, "cache_dir", None),
-            parents=train_args.parents,
-            img_height=train_args.img_height,
-            img_width=train_args.img_width,
-            img_channels=train_args.img_channels,
-            vae_ckpt=getattr(train_args, "vae_ckpt", None),
-        )
-    )
+    dataset_name = getattr(train_args, "dataset", "embed")
 
-    dataloaders = get_dataloaders(
-        DataLoaderConfig(
-            bs=batch_size,
-            num_workers=getattr(train_args, "num_workers", 4),
-            prefetch_factor=getattr(train_args, "prefetch_factor", 2),
-            seed=getattr(train_args, "seed", 0),
-            resume_step=0,
-        ),
-        datasets,
-    )
-    return dataloaders
+    if dataset_name is None:
+        dataset_name = "embed"
+
+    if dataset_name == "embed":
+        from src.data_handle.embed import (
+            get_embed,
+            get_dataloaders,
+            DataLoaderConfig,
+            DatasetConfig,
+        )
+
+        datasets = get_embed(
+            DatasetConfig(
+                data_dir=train_args.data_dir,
+                split_dir=train_args.split_dir,
+                cache_dir=getattr(train_args, "cache_dir", None),
+                parents=train_args.parents,
+                img_height=train_args.img_height,
+                img_width=train_args.img_width,
+                img_channels=train_args.img_channels,
+                vae_ckpt=getattr(train_args, "vae_ckpt", None),
+            )
+        )
+
+        dataloaders = get_dataloaders(
+            DataLoaderConfig(
+                bs=batch_size,
+                num_workers=4,
+                prefetch_factor=getattr(train_args, "prefetch_factor", 2),
+                seed=getattr(train_args, "seed", 0),
+                resume_step=0,
+            ),
+            datasets,
+        )
+        return dataloaders
+
+    if dataset_name == "cifar10":
+        from src.data_handle.cifar import (
+            get_cifar10,
+            get_dataloaders,
+            DataLoaderConfig,
+            DatasetConfig,
+        )
+
+        datasets = get_cifar10(
+            DatasetConfig(
+                data_dir=train_args.data_dir,
+                valid_frac=getattr(train_args, "valid_frac", 0.05),
+                split_seed=getattr(train_args, "split_seed", 33),
+                img_height=train_args.img_height,
+                img_width=train_args.img_width,
+                img_channels=train_args.img_channels,
+                use_labels_as_pa=True,
+            )
+        )
+
+        dataloaders = get_dataloaders(
+            DataLoaderConfig(
+                bs=batch_size,
+                num_workers=4,
+                prefetch_factor=getattr(train_args, "prefetch_factor", 2),
+                seed=getattr(train_args, "seed", 0),
+                resume_step=0,
+            ),
+            datasets,
+        )
+        return dataloaders
+
+    raise ValueError(f"Unknown dataset: {dataset_name}")
+
+
+def _get_mf_arg(train_args: argparse.Namespace, mf_name: str, plain_name: str, default):
+    if hasattr(train_args, mf_name):
+        return getattr(train_args, mf_name)
+    if hasattr(train_args, plain_name):
+        return getattr(train_args, plain_name)
+    return default
 
 
 def build_meanflow_model_from_ckpt_args(
@@ -144,7 +205,7 @@ def build_meanflow_model_from_ckpt_args(
     forward_nn = UNet(**vars(unet_cfg), **vars(block_cfg))
 
     cond_embedder = None
-    if train_args.cond_embedder != "none" and len(train_args.parents) > 0:
+    if getattr(train_args, "cond_embedder", "none") != "none" and len(train_args.parents) > 0:
         embedder_cfg = CondEmbedderConfig(
             parents=train_args.parents,
             parent_dims=parent_dims,
@@ -158,18 +219,18 @@ def build_meanflow_model_from_ckpt_args(
             raise ValueError(f"Unknown cond_embedder: {train_args.cond_embedder}")
 
     mf_config = MeanFlowConfig(
-        ratio_r_neq_t=getattr(train_args, "mf_ratio_r_neq_t", 0.25),
-        time_sampler=getattr(train_args, "mf_time_sampler", "lognorm"),
-        lognorm_mu=getattr(train_args, "mf_lognorm_mu", -0.4),
-        lognorm_sigma=getattr(train_args, "mf_lognorm_sigma", 1.0),
-        adaptive_weight_p=getattr(train_args, "mf_adaptive_weight_p", 1.0),
-        adaptive_weight_eps=getattr(train_args, "mf_adaptive_weight_eps", 1e-3),
+        ratio_r_neq_t=_get_mf_arg(train_args, "mf_ratio_r_neq_t", "ratio_r_neq_t", 0.25),
+        time_sampler=_get_mf_arg(train_args, "mf_time_sampler", "time_sampler", "lognorm"),
+        lognorm_mu=_get_mf_arg(train_args, "mf_lognorm_mu", "lognorm_mu", -0.4),
+        lognorm_sigma=_get_mf_arg(train_args, "mf_lognorm_sigma", "lognorm_sigma", 1.0),
+        adaptive_weight_p=_get_mf_arg(train_args, "mf_adaptive_weight_p", "adaptive_weight_p", 1.0),
+        adaptive_weight_eps=_get_mf_arg(train_args, "mf_adaptive_weight_eps", "adaptive_weight_eps", 1e-3),
     )
 
     model = MeanFlow(
         forward_nn=forward_nn,
         cond_embedder=cond_embedder,
-        p_uncond=train_args.p_uncond,
+        p_uncond=getattr(train_args, "p_uncond", 0.0),
         amp_dtype=amp_dtype,
         mf_config=mf_config,
     )
@@ -228,18 +289,40 @@ def clone_pa(pa: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     return {k: v.clone() for k, v in pa.items()}
 
 
-def _schema_num_classes(do_key: str) -> int | None:
-    if do_key not in CLASS_SCHEMA:
-        raise KeyError(f"Unknown intervention key '{do_key}'. Available: {list(CLASS_SCHEMA.keys())}")
+def get_class_schema(train_args: argparse.Namespace) -> dict[str, float | int]:
+    dataset_name = getattr(train_args, "dataset", "embed")
 
-    spec = CLASS_SCHEMA[do_key]
-    if isinstance(spec, float):
-        return None
-    return int(spec)
+    if dataset_name == "embed":
+        from src.data_handle.embed import CLASS_SCHEMA
+        return CLASS_SCHEMA
+
+    if dataset_name == "cifar10":
+        return {"y": 10}
+
+    return {}
+
+
+def _schema_num_classes(
+    do_key: str,
+    ref: torch.Tensor,
+    class_schema: dict[str, float | int],
+) -> int | None:
+    if do_key in class_schema:
+        spec = class_schema[do_key]
+        if isinstance(spec, float):
+            return None
+        return int(spec)
+
+    if ref.shape[-1] > 1:
+        return int(ref.shape[-1])
+
+    raise KeyError(
+        f"Unknown intervention key '{do_key}'. Available schema keys: {list(class_schema.keys())}"
+    )
 
 
 def _as_index_tensor(x: torch.Tensor) -> torch.Tensor:
-    if x.shape[-1] > 1:  # one-hot encoded
+    if x.shape[-1] > 1:
         return x.argmax(dim=-1)
     return x.view(-1).round().long()
 
@@ -249,6 +332,7 @@ def apply_single_intervention(
     pa_rand: dict[str, torch.Tensor] | None,
     do_key: str | None,
     do_mode: str,
+    class_schema: dict[str, float | int],
 ) -> dict[str, torch.Tensor]:
     if do_mode == "null":
         return clone_pa(pa)
@@ -261,7 +345,7 @@ def apply_single_intervention(
 
     pa_cf = clone_pa(pa)
     ref = pa_cf[do_key]
-    num_classes = _schema_num_classes(do_key)
+    num_classes = _schema_num_classes(do_key, ref, class_schema)
 
     if num_classes is None:
         if do_mode == "flip":
@@ -277,7 +361,7 @@ def apply_single_intervention(
     orig_idx = _as_index_tensor(ref)
 
     def _to_pa(new_idx: torch.Tensor) -> torch.Tensor:
-        if ref.shape[-1] > 1:  # one-hot
+        if ref.shape[-1] > 1:
             one_hot = torch.zeros_like(ref)
             one_hot.scatter_(-1, new_idx.unsqueeze(-1), 1.0)
             return one_hot
@@ -288,7 +372,6 @@ def apply_single_intervention(
             new_idx = 1 - orig_idx
         else:
             new_idx = (orig_idx + 1) % num_classes
-
         pa_cf[do_key] = _to_pa(new_idx)
         return pa_cf
 
@@ -299,7 +382,14 @@ def apply_single_intervention(
         rand_idx = _as_index_tensor(pa_rand[do_key]).clamp(min=0, max=num_classes - 1)
         same = rand_idx == orig_idx
         if same.any():
-            rand_idx[same] = (orig_idx[same] + 1) % num_classes
+            num_same = int(same.sum().item())
+            rand_offset = torch.randint(
+                low=1,
+                high=num_classes,
+                size=(num_same,),
+                device=orig_idx.device,
+            )
+            rand_idx[same] = (orig_idx[same] + rand_offset) % num_classes
 
         pa_cf[do_key] = _to_pa(rand_idx)
         return pa_cf
@@ -307,7 +397,7 @@ def apply_single_intervention(
     raise ValueError(f"Unknown do_mode: {do_mode}")
 
 
-def build_sample_args(
+def make_sample_args(
     cfg_mode: str,
     cfg_scale: float,
     null_keys: list[str] | None,
@@ -315,7 +405,7 @@ def build_sample_args(
     return SampleConfig(
         cfg_mode=cfg_mode,
         cfg_scale=cfg_scale,
-        null_keys=set(null_keys) if null_keys else None,
+        null_keys=None if not null_keys else set(null_keys),
     )
 
 
@@ -324,26 +414,22 @@ def generate_random_from_noise(
     noise: torch.Tensor,
     pa: dict[str, torch.Tensor] | None,
     sample_steps: int,
-    cfg_mode: str,
-    cfg_scale: float,
-    null_keys: list[str] | None,
+    sample_args: SampleConfig,
 ) -> torch.Tensor:
     if not hasattr(model, "sample"):
         raise AttributeError(
-            "Random generation for MeanFlow requires model.sample(...), "
-            "but the current model does not expose it."
+            "Random generation requires model.sample(...), "
+            "but the current MeanFlow model does not expose it."
         )
-
-    sample_args = build_sample_args(cfg_mode, cfg_scale, null_keys)
     return model.sample(
-        noise=noise,
+        noise,
         steps=sample_steps,
         pa=pa,
         sample_args=sample_args,
     )
 
 
-def invert_to_noise(
+def invert_to_noise_ode(
     model: nn.Module,
     x: torch.Tensor,
     pa_src: dict[str, torch.Tensor] | None,
@@ -351,6 +437,7 @@ def invert_to_noise(
     ode_atol: float,
     ode_rtol: float,
     ode_steps: int | None,
+    sample_args: SampleConfig | None = None,
 ) -> torch.Tensor:
     if not hasattr(model, "ode_solve"):
         raise AttributeError(
@@ -358,42 +445,17 @@ def invert_to_noise(
             "but the current MeanFlow model does not expose it."
         )
 
-    t = build_encode_time_grid(x.device, ode_steps)
-
+    t = build_time_grid("backward", x.device, ode_steps)
     traj = model.ode_solve(
         x,
         pa=pa_src,
-        sample_args=SampleConfig(cfg_mode="none", cfg_scale=1.0, null_keys=None),
+        sample_args=sample_args,
         t=t,
         method=ode_method,
         atol=ode_atol,
         rtol=ode_rtol,
     )
     return traj[-1]
-
-
-def generate_from_inverted_noise(
-    model: nn.Module,
-    noise: torch.Tensor,
-    pa_cf: dict[str, torch.Tensor] | None,
-    sample_steps: int,
-    cfg_mode: str,
-    cfg_scale: float,
-    null_keys: list[str] | None,
-) -> torch.Tensor:
-    if not hasattr(model, "sample"):
-        raise AttributeError(
-            "Counterfactual decoding requires model.sample(...), "
-            "but the current MeanFlow model does not expose it."
-        )
-
-    sample_args = build_sample_args(cfg_mode, cfg_scale, null_keys)
-    return model.sample(
-        noise=noise,
-        steps=sample_steps,
-        pa=pa_cf,
-        sample_args=sample_args,
-    )
 
 
 def get_ckpt_tag(ckpt_path: str) -> str:
@@ -404,88 +466,83 @@ def get_exp_name(train_args: argparse.Namespace) -> str:
     return getattr(train_args, "exp_name", "unknown_exp")
 
 
-def get_sampler_tag(
+def get_cfg_tag(cfg_mode: str, cfg_scale: float, null_keys: list[str] | None) -> str:
+    if cfg_mode == "none":
+        base = "no_cfg"
+    else:
+        base = f"{cfg_mode}_w-{cfg_scale:g}"
+
+    if null_keys:
+        joined = "_".join(sorted(null_keys))
+        base = f"{base}_null-{joined}"
+    return base
+
+
+def get_rs_sampler_tag(
     sample_steps: int,
-    ode_method: str,
-    ode_atol: float,
-    ode_rtol: float,
-    ode_steps: int | None,
     cfg_mode: str,
     cfg_scale: float,
     null_keys: list[str] | None,
 ) -> str:
-    base = (
-        f"mfsteps-{sample_steps}"
-        f"_cfg-{cfg_mode}"
-        f"_w-{cfg_scale:g}"
-        f"_ode-{ode_method}"
-        f"_atol-{_format_float_tag(ode_atol)}"
-        f"_rtol-{_format_float_tag(ode_rtol)}"
-    )
+    cfg_tag = get_cfg_tag(cfg_mode, cfg_scale, null_keys)
+    return f"mf_steps-{sample_steps}_{cfg_tag}"
+
+
+def get_cf_sampler_tag(
+    ode_method: str,
+    ode_atol: float,
+    ode_rtol: float,
+    ode_steps: int | None,
+    sample_steps: int,
+    cfg_mode: str,
+    cfg_scale: float,
+    null_keys: list[str] | None,
+) -> str:
     if ode_steps is not None:
-        base += f"_odesteps-{ode_steps}"
-    if null_keys:
-        base += "_null-" + "_".join(sorted(null_keys))
-    return base
+        inv_tag = f"invode-{ode_method}_steps-{ode_steps}"
+    else:
+        inv_tag = (
+            f"invode-{ode_method}"
+            f"_atol-{_format_float_tag(ode_atol)}"
+            f"_rtol-{_format_float_tag(ode_rtol)}"
+        )
+
+    rs_tag = f"mf_steps-{sample_steps}"
+    cfg_tag = get_cfg_tag(cfg_mode, cfg_scale, null_keys)
+    return f"{inv_tag}_{rs_tag}_{cfg_tag}"
 
 
 def build_sampling_root(
     save_root: str,
     ckpt_path: str,
     train_args: argparse.Namespace,
-    sample_steps: int,
-    ode_method: str,
-    ode_atol: float,
-    ode_rtol: float,
-    ode_steps: int | None,
-    cfg_mode: str,
-    cfg_scale: float,
-    null_keys: list[str] | None,
+    sampler_tag: str,
 ) -> Path:
     exp_name = get_exp_name(train_args)
     ckpt_tag = get_ckpt_tag(ckpt_path)
-    sampler_tag = get_sampler_tag(
-        sample_steps=sample_steps,
-        ode_method=ode_method,
-        ode_atol=ode_atol,
-        ode_rtol=ode_rtol,
-        ode_steps=ode_steps,
-        cfg_mode=cfg_mode,
-        cfg_scale=cfg_scale,
-        null_keys=null_keys,
-    )
     return Path(save_root) / exp_name / ckpt_tag / sampler_tag
 
 
-def build_random_save_dir(
+def build_random_save_dirs(
     save_root: str,
     ckpt_path: str,
     train_args: argparse.Namespace,
     cond_source: str,
-    sample_steps: int,
-    ode_method: str,
-    ode_atol: float,
-    ode_rtol: float,
-    ode_steps: int | None,
-    cfg_mode: str,
-    cfg_scale: float,
-    null_keys: list[str] | None,
-) -> Path:
+    sampler_tag: str,
+) -> dict[str, Path]:
     root = build_sampling_root(
         save_root=save_root,
         ckpt_path=ckpt_path,
         train_args=train_args,
-        sample_steps=sample_steps,
-        ode_method=ode_method,
-        ode_atol=ode_atol,
-        ode_rtol=ode_rtol,
-        ode_steps=ode_steps,
-        cfg_mode=cfg_mode,
-        cfg_scale=cfg_scale,
-        null_keys=null_keys,
+        sampler_tag=sampler_tag,
     )
     cond_tag = "cond_dataset" if cond_source == "dataset" else "uncond"
-    return root / "randoms" / cond_tag
+    random_root = root / "randoms" / cond_tag
+    return {
+        "root": random_root,
+        "rs": random_root / "rs",
+        "rs_visual": random_root / "rs_visual",
+    }
 
 
 def build_cf_save_dirs(
@@ -494,27 +551,13 @@ def build_cf_save_dirs(
     train_args: argparse.Namespace,
     do_key: str | None,
     do_mode: str,
-    sample_steps: int,
-    ode_method: str,
-    ode_atol: float,
-    ode_rtol: float,
-    ode_steps: int | None,
-    cfg_mode: str,
-    cfg_scale: float,
-    null_keys: list[str] | None,
+    sampler_tag: str,
 ) -> dict[str, Path]:
     root = build_sampling_root(
         save_root=save_root,
         ckpt_path=ckpt_path,
         train_args=train_args,
-        sample_steps=sample_steps,
-        ode_method=ode_method,
-        ode_atol=ode_atol,
-        ode_rtol=ode_rtol,
-        ode_steps=ode_steps,
-        cfg_mode=cfg_mode,
-        cfg_scale=cfg_scale,
-        null_keys=null_keys,
+        sampler_tag=sampler_tag,
     )
 
     if do_mode == "null":
@@ -535,7 +578,7 @@ def _get_pa_scalar(pa: dict[str, torch.Tensor], key: str, idx: int) -> float:
     if v.ndim == 0:
         return float(v.detach().cpu().item())
     vi = v[idx]
-    if vi.numel() > 1:  # one-hot encoded
+    if vi.numel() > 1:
         return float(vi.argmax().item())
     return float(vi.item())
 
@@ -551,6 +594,8 @@ def _format_pa_value(key: str, value: float) -> str:
         return VIEW_LABELS.get(ivalue, str(ivalue))
     if key == "cview":
         return CVIEW_LABELS.get(ivalue, str(ivalue))
+    if key == "y":
+        return CIFAR10_LABELS.get(ivalue, str(ivalue))
     return str(ivalue)
 
 
@@ -570,6 +615,73 @@ def _format_attr_block(
     for start in range(0, len(items), items_per_line):
         lines.append(" | ".join(items[start:start + items_per_line]))
     return "\n".join(lines)
+
+
+def _format_random_hparam_title(meta: dict, global_idx: int) -> str:
+    return (
+        f"random sample #{global_idx:06d}\n"
+        f"mode={meta['mode']} | cond_source={meta['cond_source']}"
+    )
+
+
+def _format_random_hparam_xlabel(meta: dict) -> str:
+    line1 = f"sample_steps={meta['sample_steps']} | cfg={meta['cfg_mode']} | cfg_scale={meta['cfg_scale']}"
+    line2 = (
+        f"split={meta['split']} | batch_size={meta['batch_size']} | "
+        f"seed={meta['seed']} | use_ema={meta['use_ema']}"
+    )
+    return f"{line1}\n{line2}"
+
+
+def _format_random_hparam_ylabel(
+    pa: dict[str, torch.Tensor] | None,
+    idx: int,
+    parents: list[str],
+) -> str:
+    if pa is None:
+        return "conditioning\nnone (unconditional)"
+
+    return _format_attr_block(
+        title="conditioning",
+        pa=pa,
+        idx=idx,
+        parents=parents,
+        items_per_line=2,
+    )
+
+
+def _save_random_visual(
+    img: torch.Tensor,
+    save_path: Path,
+    pa: dict[str, torch.Tensor] | None,
+    idx: int,
+    global_idx: int,
+    parents: list[str],
+    meta: dict,
+) -> None:
+    title = _format_random_hparam_title(meta, global_idx)
+    xlabel = _format_random_hparam_xlabel(meta)
+    ylabel = _format_random_hparam_ylabel(pa, idx, parents)
+
+    img_np = img.detach().cpu().float().numpy()
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    if img_np.ndim == 3 and img_np.shape[0] == 1:
+        ax.imshow(img_np[0], cmap="gray", vmin=0.0, vmax=1.0)
+    elif img_np.ndim == 3:
+        ax.imshow(np.transpose(img_np, (1, 2, 0)))
+    else:
+        ax.imshow(img_np, cmap="gray", vmin=0.0, vmax=1.0)
+
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel(xlabel, fontsize=8)
+    ax.set_ylabel(ylabel, fontsize=8, rotation=0, labelpad=55, va="center")
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
 
 
 def _make_diff_heatmap(
@@ -691,15 +803,30 @@ def _render_cf_visual_with_diff(
 
 def save_random_samples(
     samples: torch.Tensor,
-    save_dir: Path,
+    save_dirs: dict[str, Path],
     start_idx: int,
+    pa: dict[str, torch.Tensor] | None,
+    parents: list[str],
+    meta: dict,
 ) -> None:
-    save_dir.mkdir(parents=True, exist_ok=True)
+    for d in save_dirs.values():
+        d.mkdir(parents=True, exist_ok=True)
 
     vis = ((samples.clamp(-1, 1) + 1.0) / 2.0).cpu()
+    pa_cpu = None if pa is None else {k: v.detach().cpu() for k, v in pa.items()}
+
     for i in range(vis.shape[0]):
         idx = start_idx + i
-        save_image(vis[i], save_dir / f"{idx:06d}_rand.png")
+        save_image(vis[i], save_dirs["rs"] / f"{idx:06d}_rand.png")
+        _save_random_visual(
+            img=vis[i],
+            save_path=save_dirs["rs_visual"] / f"{idx:06d}_viz.png",
+            pa=pa_cpu,
+            idx=i,
+            global_idx=idx,
+            parents=parents,
+            meta=meta,
+        )
 
 
 def save_counterfactual_samples(
@@ -717,6 +844,9 @@ def save_counterfactual_samples(
     src_vis = ((x_src.clamp(-1, 1) + 1.0) / 2.0).cpu()
     cf_vis = ((x_cf.clamp(-1, 1) + 1.0) / 2.0).cpu()
 
+    pa_src_cpu = {k: v.detach().cpu() for k, v in pa_src.items()}
+    pa_cf_cpu = {k: v.detach().cpu() for k, v in pa_cf.items()}
+
     for i in range(src_vis.shape[0]):
         idx = start_idx + i
 
@@ -726,8 +856,8 @@ def save_counterfactual_samples(
         viz_img = _render_cf_visual_with_diff(
             src_img=src_vis[i],
             cf_img=cf_vis[i],
-            pa_src=pa_src,
-            pa_cf=pa_cf,
+            pa_src=pa_src_cpu,
+            pa_cf=pa_cf_cpu,
             idx=i,
             parents=parents,
         )
@@ -738,8 +868,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", type=str, required=True)
     parser.add_argument("--save_dir", type=str, required=True)
-    parser.add_argument("--split_dir", type=str, default=None,
-                        help="Override the split_dir stored in the checkpoint.")
+    parser.add_argument(
+        "--split_dir",
+        type=str,
+        default=None,
+        help="Override the split_dir stored in the checkpoint.",
+    )
     parser.add_argument("--num_samples", type=int, default=32)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
@@ -749,9 +883,9 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        default="random",
-        choices=["random", "cf"],
-        help="random: sample from Gaussian noise; cf: generate counterfactuals from real images.",
+        default="rs",
+        choices=["rs", "cf"],
+        help="rs: random sampling with MeanFlow.sample(...); cf: experimental ODE inversion + MeanFlow sampling.",
     )
     parser.add_argument(
         "--cond_source",
@@ -767,36 +901,27 @@ def main():
         default="flip",
         choices=["null", "flip", "random"],
         help=(
-            "null: keep conditioning unchanged and reconstruct the input; "
+            "null: keep conditioning unchanged and reconstruct approximately; "
             "flip: binary flip or cyclic next-class for multiclass; "
             "random: resample from dataset."
         ),
     )
 
-    parser.add_argument(
-        "--sample_steps",
-        type=int,
-        default=1,
-        help="Number of MeanFlow discrete decode steps used by model.sample(...).",
-    )
+    parser.add_argument("--sample_steps", type=int, default=1)
+
     parser.add_argument(
         "--cfg_mode",
         type=str,
         default="none",
         choices=["none", "cfg"],
-        help="Sampling guidance mode used by MeanFlow.sample(...).",
     )
-    parser.add_argument(
-        "--cfg_scale",
-        type=float,
-        default=1.0,
-        help="Classifier-free guidance scale used when cfg_mode='cfg'.",
-    )
+    parser.add_argument("--cfg_scale", type=float, default=1.0)
     parser.add_argument(
         "--null_keys",
+        type=str,
         nargs="*",
         default=None,
-        help="Optional keys to null when building the null branch for CFG.",
+        help="Optional conditioning keys to null during CFG.",
     )
 
     parser.add_argument("--ode_method", type=str, default="dopri5")
@@ -806,7 +931,7 @@ def main():
         "--ode_steps",
         type=int,
         default=None,
-        help="Number of intervals for x->noise ODE inversion grid. Useful for fixed-step solvers.",
+        help="Number of intervals on [0,1] for ODE inversion in cf mode.",
     )
 
     args = parser.parse_args()
@@ -832,47 +957,67 @@ def main():
     )
     model.eval()
 
-    if args.mode == "random":
-        save_dir = build_random_save_dir(
-            save_root=args.save_dir,
-            ckpt_path=args.ckpt,
-            train_args=train_args,
-            cond_source=args.cond_source,
+    class_schema = get_class_schema(train_args)
+
+    sample_args = make_sample_args(
+        cfg_mode=args.cfg_mode,
+        cfg_scale=args.cfg_scale,
+        null_keys=args.null_keys,
+    )
+    # ode_solve in your current MeanFlow mainly uses pa/null_keys;
+    # keep this conservative for inversion.
+    ode_sample_args = make_sample_args(
+        cfg_mode="none",
+        cfg_scale=1.0,
+        null_keys=args.null_keys,
+    )
+
+    if args.mode == "rs":
+        sampler_tag = get_rs_sampler_tag(
             sample_steps=args.sample_steps,
-            ode_method=args.ode_method,
-            ode_atol=args.ode_atol,
-            ode_rtol=args.ode_rtol,
-            ode_steps=args.ode_steps,
             cfg_mode=args.cfg_mode,
             cfg_scale=args.cfg_scale,
             null_keys=args.null_keys,
         )
-        save_dir.mkdir(parents=True, exist_ok=True)
+        random_save_dirs = build_random_save_dirs(
+            save_root=args.save_dir,
+            ckpt_path=args.ckpt,
+            train_args=train_args,
+            cond_source=args.cond_source,
+            sampler_tag=sampler_tag,
+        )
+        save_dir = random_save_dirs["root"]
+        for d in random_save_dirs.values():
+            d.mkdir(parents=True, exist_ok=True)
         cf_save_dirs = None
     elif args.mode == "cf":
+        sampler_tag = get_cf_sampler_tag(
+            ode_method=args.ode_method,
+            ode_atol=args.ode_atol,
+            ode_rtol=args.ode_rtol,
+            ode_steps=args.ode_steps,
+            sample_steps=args.sample_steps,
+            cfg_mode=args.cfg_mode,
+            cfg_scale=args.cfg_scale,
+            null_keys=args.null_keys,
+        )
         cf_save_dirs = build_cf_save_dirs(
             save_root=args.save_dir,
             ckpt_path=args.ckpt,
             train_args=train_args,
             do_key=args.do_key,
             do_mode=args.do_mode,
-            sample_steps=args.sample_steps,
-            ode_method=args.ode_method,
-            ode_atol=args.ode_atol,
-            ode_rtol=args.ode_rtol,
-            ode_steps=args.ode_steps,
-            cfg_mode=args.cfg_mode,
-            cfg_scale=args.cfg_scale,
-            null_keys=args.null_keys,
+            sampler_tag=sampler_tag,
         )
         save_dir = cf_save_dirs["root"]
         for d in cf_save_dirs.values():
             d.mkdir(parents=True, exist_ok=True)
+        random_save_dirs = None
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
     cond_iter = None
-    if args.mode == "random" and args.cond_source == "dataset":
+    if args.mode == "rs" and args.cond_source == "dataset":
         cond_iter = get_iterator(train_args, args.batch_size, args.split)
 
     src_iter = None
@@ -897,11 +1042,12 @@ def main():
         "cfg_mode": args.cfg_mode,
         "cfg_scale": args.cfg_scale,
         "null_keys": args.null_keys,
-        "ode_method": args.ode_method,
-        "ode_atol": args.ode_atol,
-        "ode_rtol": args.ode_rtol,
-        "ode_steps": args.ode_steps,
+        "ode_method": args.ode_method if args.mode == "cf" else None,
+        "ode_atol": args.ode_atol if args.mode == "cf" and args.ode_steps is None else None,
+        "ode_rtol": args.ode_rtol if args.mode == "cf" and args.ode_steps is None else None,
+        "ode_steps": args.ode_steps if args.mode == "cf" else None,
     }
+
     with open(save_dir / "sampling_args.json", "w") as f:
         json.dump(meta, f, indent=2)
 
@@ -909,7 +1055,7 @@ def main():
     while produced < args.num_samples:
         bs = min(args.batch_size, args.num_samples - produced)
 
-        if args.mode == "random":
+        if args.mode == "rs":
             noise = torch.randn(
                 bs,
                 train_args.img_channels,
@@ -934,12 +1080,17 @@ def main():
                 noise=noise,
                 pa=pa,
                 sample_steps=args.sample_steps,
-                cfg_mode=args.cfg_mode,
-                cfg_scale=args.cfg_scale,
-                null_keys=args.null_keys,
+                sample_args=sample_args,
             )
 
-            save_random_samples(samples, save_dir, produced)
+            save_random_samples(
+                samples=samples,
+                save_dirs=random_save_dirs,
+                start_idx=produced,
+                pa=pa,
+                parents=train_args.parents,
+                meta=meta,
+            )
             produced += bs
             print(f"Saved {produced}/{args.num_samples} random samples to {save_dir}")
 
@@ -970,9 +1121,10 @@ def main():
                 pa_rand=pa_rand,
                 do_key=args.do_key,
                 do_mode=args.do_mode,
+                class_schema=class_schema,
             )
 
-            noise = invert_to_noise(
+            noise = invert_to_noise_ode(
                 model=model,
                 x=x_src,
                 pa_src=pa_src,
@@ -980,16 +1132,15 @@ def main():
                 ode_atol=args.ode_atol,
                 ode_rtol=args.ode_rtol,
                 ode_steps=args.ode_steps,
+                sample_args=ode_sample_args,
             )
 
-            x_cf = generate_from_inverted_noise(
+            x_cf = generate_random_from_noise(
                 model=model,
                 noise=noise,
-                pa_cf=pa_cf,
+                pa=pa_cf,
                 sample_steps=args.sample_steps,
-                cfg_mode=args.cfg_mode,
-                cfg_scale=args.cfg_scale,
-                null_keys=args.null_keys,
+                sample_args=sample_args,
             )
 
             save_counterfactual_samples(

@@ -38,22 +38,18 @@ CIFAR10_LABELS = {
     9: "truck",
 }
 
-
 def to_namespace(d: dict) -> argparse.Namespace:
     return argparse.Namespace(**d)
-
 
 def select_amp_dtype(device: torch.device) -> torch.dtype | None:
     if device.type == "cuda" and torch.cuda.get_device_capability(device)[0] >= 7:
         return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     return None
 
-
 def _format_float_tag(x: float) -> str:
     s = f"{x:.0e}"
     s = s.replace("e-0", "e-").replace("e+0", "e+")
     return s
-
 
 def build_time_grid(
     direction: str,
@@ -75,7 +71,6 @@ def build_time_grid(
     if direction == "backward":
         return torch.linspace(1.0, 0.0, ode_steps + 1, device=device)
     raise ValueError(f"Unknown direction: {direction}")
-
 
 def build_dataloaders_from_train_args(
     train_args: argparse.Namespace,
@@ -1113,7 +1108,6 @@ def main():
             print(f"Saved {produced}/{args.num_samples} outputs to {save_dir}")
 
     print(f"Done. Samples saved to: {save_dir}")
-
 
 if __name__ == "__main__":
     main()

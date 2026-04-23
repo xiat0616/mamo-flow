@@ -24,17 +24,17 @@ split="valid"
 use_ema=1
 cond_source="dataset"
 
-# Adaptive solver example:
-ode_method="dopri5"
-ode_atol="1e-5"
-ode_rtol="1e-5"
-ode_steps=""
+# # Adaptive solver example:
+# ode_method="dopri5"
+# ode_atol="1e-5"sampling_results/mammo256_gpus48_flow_embed_256_192_condemb_per_attr_mchannel_64_puncond_0.2/best_checkpoint/ode-dopri5_atol-1e-5_rtol-1e-5/cfs/view
+# ode_rtol="1e-5"
+# ode_steps=""
 
 # Fixed-step solver example:
-# ode_method="midpoint"
-# ode_atol=""
-# ode_rtol=""
-# ode_steps="100"
+ode_method="midpoint"
+ode_atol=""
+ode_rtol=""
+ode_steps="1000"
 
 # ----------------------------
 # Helper: match Python _format_float_tag()
@@ -59,7 +59,7 @@ else
     sampler_tag="ode-${ode_method}_atol-${ode_atol_tag}_rtol-${ode_rtol_tag}"
 fi
 
-if [ "$mode" = "random" ]; then
+if [ "$mode" = "rs" ]; then
     cond_tag="cond_dataset"
     if [ "$cond_source" = "none" ]; then
         cond_tag="uncond"
