@@ -11,13 +11,6 @@ import matplotlib.pyplot as plt
 from torchvision.transforms.functional import to_pil_image
 from torchvision.utils import save_image
 
-from src.data_handle.embed import (
-    CLASS_SCHEMA,
-    get_embed,
-    get_dataloaders,
-    DataLoaderConfig,
-    DatasetConfig,
-)
 from src.models.embedder import (
     GlobalCondEmbedder,
     PerAttrCondEmbedder,
@@ -32,7 +25,18 @@ from src.utils import ModelEMA, seed_all
 DENSITY_LABELS = {0: "A", 1: "B", 2: "C", 3: "D"}
 VIEW_LABELS = {0: "MLO", 1: "CC"}
 CVIEW_LABELS = {0: "2D", 1: "CView"}
-
+CIFAR10_LABELS = {
+    0: "airplane",
+    1: "automobile",
+    2: "bird",
+    3: "cat",
+    4: "deer",
+    5: "dog",
+    6: "frog",
+    7: "horse",
+    8: "ship",
+    9: "truck",
+}
 
 
 def to_namespace(d: dict) -> argparse.Namespace:
@@ -77,31 +81,76 @@ def build_dataloaders_from_train_args(
     train_args: argparse.Namespace,
     batch_size: int,
 ) -> dict[str, torch.utils.data.DataLoader]:
-    datasets = get_embed(
-        DatasetConfig(
-            data_dir=train_args.data_dir,
-            split_dir=train_args.split_dir,
-            cache_dir=getattr(train_args, "cache_dir", None),
-            parents=train_args.parents,
-            img_height=train_args.img_height,
-            img_width=train_args.img_width,
-            img_channels=train_args.img_channels,
-            vae_ckpt=getattr(train_args, "vae_ckpt", None),
-        )
-    )
+    dataset_name = getattr(train_args, "dataset", "embed")
 
-    dataloaders = get_dataloaders(
-        DataLoaderConfig(
-            bs=batch_size,
-            # num_workers=getattr(train_args, "num_workers", 4),
-            num_workers=4,
-            prefetch_factor=getattr(train_args, "prefetch_factor", 2),
-            seed=getattr(train_args, "seed", 0),
-            resume_step=0,
-        ),
-        datasets,
-    )
-    return dataloaders
+    if dataset_name is None:
+        dataset_name = "embed"  # default to embed if not specified
+    if dataset_name == "embed":
+        from src.data_handle.embed import (
+            get_embed,
+            get_dataloaders,
+            DataLoaderConfig,
+            DatasetConfig,
+        )
+
+        datasets = get_embed(
+            DatasetConfig(
+                data_dir=train_args.data_dir,
+                split_dir=train_args.split_dir,
+                cache_dir=getattr(train_args, "cache_dir", None),
+                parents=train_args.parents,
+                img_height=train_args.img_height,
+                img_width=train_args.img_width,
+                img_channels=train_args.img_channels,
+                vae_ckpt=getattr(train_args, "vae_ckpt", None),
+            )
+        )
+
+        dataloaders = get_dataloaders(
+            DataLoaderConfig(
+                bs=batch_size,
+                num_workers=4,
+                prefetch_factor=getattr(train_args, "prefetch_factor", 2),
+                seed=getattr(train_args, "seed", 0),
+                resume_step=0,
+            ),
+            datasets,
+        )
+        return dataloaders
+
+    if dataset_name == "cifar10":
+        from src.data_handle.cifar import (
+            get_cifar10,
+            get_dataloaders,
+            DataLoaderConfig,
+            DatasetConfig,
+        )
+
+        datasets = get_cifar10(
+            DatasetConfig(
+                data_dir=train_args.data_dir,
+                valid_frac=getattr(train_args, "valid_frac", 0.05),
+                split_seed=getattr(train_args, "split_seed", 33),
+                img_height=train_args.img_height,
+                img_width=train_args.img_width,
+                img_channels=train_args.img_channels,
+                use_labels_as_pa=True,
+            )
+        )
+
+        dataloaders = get_dataloaders(
+            DataLoaderConfig(
+                bs=batch_size,
+                num_workers=4,
+                prefetch_factor=getattr(train_args, "prefetch_factor", 2),
+                seed=getattr(train_args, "seed", 0),
+                resume_step=0,
+            ),
+            datasets,
+        )
+        return dataloaders
+
+    raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
 def build_flow_model_from_ckpt_args(
@@ -217,14 +266,37 @@ def clone_pa(pa: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     return {k: v.clone() for k, v in pa.items()}
 
 
-def _schema_num_classes(do_key: str) -> int | None:
-    if do_key not in CLASS_SCHEMA:
-        raise KeyError(f"Unknown intervention key '{do_key}'. Available: {list(CLASS_SCHEMA.keys())}")
+def get_class_schema(train_args: argparse.Namespace) -> dict[str, float | int]:
+    dataset_name = getattr(train_args, "dataset", "embed")
 
-    spec = CLASS_SCHEMA[do_key]
-    if isinstance(spec, float):
-        return None
-    return int(spec)
+    if dataset_name == "embed":
+        from src.data_handle.embed import CLASS_SCHEMA
+        return CLASS_SCHEMA
+
+    if dataset_name == "cifar10":
+        return {"y": 10}
+
+    return {}
+
+
+def _schema_num_classes(
+    do_key: str,
+    ref: torch.Tensor,
+    class_schema: dict[str, float | int],
+) -> int | None:
+    if do_key in class_schema:
+        spec = class_schema[do_key]
+        if isinstance(spec, float):
+            return None
+        return int(spec)
+
+    # Fallback: infer from one-hot tensor
+    if ref.shape[-1] > 1:
+        return int(ref.shape[-1])
+
+    raise KeyError(
+        f"Unknown intervention key '{do_key}'. Available schema keys: {list(class_schema.keys())}"
+    )
 
 
 def _as_index_tensor(x: torch.Tensor) -> torch.Tensor:
@@ -238,6 +310,7 @@ def apply_single_intervention(
     pa_rand: dict[str, torch.Tensor] | None,
     do_key: str | None,
     do_mode: str,
+    class_schema: dict[str, float | int],
 ) -> dict[str, torch.Tensor]:
     if do_mode == "null":
         return clone_pa(pa)
@@ -250,7 +323,7 @@ def apply_single_intervention(
 
     pa_cf = clone_pa(pa)
     ref = pa_cf[do_key]
-    num_classes = _schema_num_classes(do_key)
+    num_classes = _schema_num_classes(do_key, ref, class_schema)
 
     if num_classes is None:
         if do_mode == "flip":
@@ -512,6 +585,8 @@ def _format_pa_value(key: str, value: float) -> str:
         return VIEW_LABELS.get(ivalue, str(ivalue))
     if key == "cview":
         return CVIEW_LABELS.get(ivalue, str(ivalue))
+    if key == "y":
+        return CIFAR10_LABELS.get(ivalue, str(ivalue))
     return str(ivalue)
 
 
@@ -770,6 +845,9 @@ def save_counterfactual_samples(
     src_vis = ((x_src.clamp(-1, 1) + 1.0) / 2.0).cpu()
     cf_vis = ((x_cf.clamp(-1, 1) + 1.0) / 2.0).cpu()
 
+    pa_src_cpu = {k: v.detach().cpu() for k, v in pa_src.items()}
+    pa_cf_cpu = {k: v.detach().cpu() for k, v in pa_cf.items()}
+
     for i in range(src_vis.shape[0]):
         idx = start_idx + i
 
@@ -779,8 +857,8 @@ def save_counterfactual_samples(
         viz_img = _render_cf_visual_with_diff(
             src_img=src_vis[i],
             cf_img=cf_vis[i],
-            pa_src=pa_src,
-            pa_cf=pa_cf,
+            pa_src=pa_src_cpu,
+            pa_cf=pa_cf_cpu,
             idx=i,
             parents=parents,
         )
@@ -857,6 +935,8 @@ def main():
         use_ema=args.use_ema,
     )
     model.eval()
+
+    class_schema = get_class_schema(train_args)
 
     if args.mode == "random":
         random_save_dirs = build_random_save_dirs(
@@ -995,6 +1075,7 @@ def main():
                 pa_rand=pa_rand,
                 do_key=args.do_key,
                 do_mode=args.do_mode,
+                class_schema=class_schema,
             )
 
             noise = invert_to_noise(

@@ -1,5 +1,5 @@
 #!/bin/bash
-exp_name="mammo256_loki_flow_embed_256_192_condemb_per_attr_mchannel_64_puncond_0.2"
+exp_name="mammo256_gpus48_flow_embed_256_192_condemb_per_attr_mchannel_64_puncond_0.2"
 ckpt_file="best_checkpoint.pt"
 mode="${1:?Please provide mode: random or cf}"   # random or cf
 do_key="${2:-none}"                              # for cf key: view, cview, density
@@ -8,7 +8,7 @@ do_mode="${3:-flip}"                             # for cf mode: flip, null, or r
 project_root="/vol/biomedic3/tx1215/mamo-flow"
 save_root="${project_root}/sampling_results"
 ckpt="${project_root}/checkpoints/${exp_name}/${ckpt_file}"
-split_dir="${project_root}/assets/splits"
+split_dir="${project_root}/assets/embed_splits_v1"
 
 if [ ! -f "$ckpt" ]; then
     echo "Checkpoint not found: $ckpt"
@@ -114,7 +114,7 @@ cmd="${cmd% }"
 
 sbatch <<EOF
 #!/bin/bash
-#SBATCH --partition=gpus48,gpus24
+#SBATCH --partition=gpus48,gpus24,gpus
 #SBATCH --gres=gpu:1
 #SBATCH --exclude=monal04,monal05
 #SBATCH --output=${run_dir}/slurm.%j.out
