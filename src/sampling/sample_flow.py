@@ -82,9 +82,11 @@ def build_dataloaders_from_train_args(
     batch_size: int,
 ) -> dict[str, torch.utils.data.DataLoader]:
     dataset_name = getattr(train_args, "dataset", "embed")
-
-    if dataset_name is None:
-        dataset_name = "embed"  # default to embed if not specified
+    
+    #NOTE Monkey code now, as the previously trained flow matching assume EMBED by default.
+    if dataset_name is None: 
+        dataset_name = "embed" 
+         # default to embed if not specified
     if dataset_name == "embed":
         from src.data_handle.embed import (
             get_embed,
