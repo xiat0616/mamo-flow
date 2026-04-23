@@ -20,6 +20,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from torch import Tensor
 from torchvision.utils import make_grid
 
+DEBUG=False
 
 # -----------------------------------------------------------------------------
 # Pretty-name maps for labels shown in plots
@@ -27,7 +28,7 @@ from torchvision.utils import make_grid
 
 DEFAULT_IDX_TO_NAME: dict[str, list[str]] = {
     "view": ["MLO", "non-MLO"],
-    "density": ["A", "B", "C", "D"],
+    "density": ["D", "C", "B", "A"] if DEBUG else ["A", "B", "C", "D"],
     "scanner": [
         "Selenia Dimensions",
         "Senographe Pristina",

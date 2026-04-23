@@ -5,17 +5,17 @@ base_name="${1:-flow}"
 # ----------------------------
 dataset="embed"
 
-img_height=256
-img_width=192
+img_height=128
+img_width=96
 cond_embedder="per_attr"
-model_channels=64
+model_channels=32
 p_uncond=0.2
 
 # optional: other useful vars
 img_channels=1
 epochs=10000
-bs=48
-lr=1e-4
+bs=192
+lr=1e-3
 
 exp_name="${dataset}_${base_name}_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
 
@@ -40,7 +40,7 @@ ARGS=(
     --epochs=$epochs
     --bs=$bs
     --lr=$lr
-    --lr_warmup=2000
+    --lr_warmup=5000
     --wd=0.0
     --betas 0.9 0.999
     --eps=1e-8
@@ -60,7 +60,7 @@ ARGS=(
 # MODEL
     unet
     --model_channels=$model_channels
-    --channel_mult 1 2 3 4 5
+    --channel_mult 1 2 4 6
     --cond_embed_dim=160
     --num_blocks=3
     --attn_resolutions 16x12

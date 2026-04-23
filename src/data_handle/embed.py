@@ -18,6 +18,7 @@ from torchvision import transforms
 sys.path.append("..")
 from src.utils import seed_worker
 
+DEBUG=False
 
 @dataclass
 class DataLoaderConfig:
@@ -130,7 +131,10 @@ def get_sample(
     return_image: bool = True,
 ) -> tuple[np.ndarray, Metadata] | Metadata:
     metadata: Metadata = {k: row[k] for k in get_type_hints(Metadata)}
-    metadata["age"] = float(metadata["age"]) / 100.0
+    if DEBUG:
+        metadata["age"] = float(metadata["age"]) / 100.0
+
+    metadata["density"] =3.0-float(metadata["density"]) # #NOTE Flip this for debugging.
 
     if not return_image:
         return metadata
