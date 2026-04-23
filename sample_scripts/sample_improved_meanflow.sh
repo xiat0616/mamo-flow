@@ -1,8 +1,8 @@
 #!/bin/bash
-exp_name="mammo256_gpus48_meanflow_embed_256_192_condemb_per_attr_mchannel_64_puncond_0.2_rneqt_0.25_lognorm"
+exp_name="mammo128_gpus48_improved_meanflow_embed_128_96_condemb_per_attr_mchannel_64_puncond_0.2_rneqt_0.25_lognorm"
 ckpt_file="best_checkpoint.pt"
 
-mode="${1:-rs}"   # rs or cf
+mode="${1:-rs}"                              # rs or cf
 do_key="${2:-none}"                          # for cf key: view, cview, density
 do_mode="${3:-flip}"                         # for cf mode: flip, null, or random
 
@@ -27,11 +27,11 @@ cond_source="dataset"
 seed=0
 
 # ----------------------------
-# MeanFlow sampling config
+# Improved MeanFlow sampling config
 # ----------------------------
 sample_steps=10
 
-# CFG for MeanFlow.sample(...)
+# CFG for ImprovedMeanFlow.sample(...)
 cfg_mode="none"         # none or cfg
 cfg_scale="1.0"
 null_keys=()            # e.g. ("density") or ("view" "density")
@@ -68,7 +68,7 @@ PY
 ckpt_tag="${ckpt_file%.*}"
 
 # -------------------------------
-# Match sample_meanflow.py tag logic
+# Match sample_improved_meanflow.py tag logic
 # -------------------------------
 cfg_tag="no_cfg"
 if [ "$cfg_mode" != "none" ]; then
@@ -80,7 +80,7 @@ if [ "${#null_keys[@]}" -gt 0 ]; then
     cfg_tag="${cfg_tag}_null-${null_joined}"
 fi
 
-rs_sampler_tag="mf_steps-${sample_steps}_${cfg_tag}"
+rs_sampler_tag="imf_steps-${sample_steps}_${cfg_tag}"
 
 if [ -n "$ode_steps" ]; then
     inv_tag="invode-${ode_method}_steps-${ode_steps}"
@@ -90,7 +90,7 @@ else
     inv_tag="invode-${ode_method}_atol-${ode_atol_tag}_rtol-${ode_rtol_tag}"
 fi
 
-cf_sampler_tag="${inv_tag}_mf_steps-${sample_steps}_${cfg_tag}"
+cf_sampler_tag="${inv_tag}_imf_steps-${sample_steps}_${cfg_tag}"
 
 if [ "$mode" = "rs" ]; then
     sampler_tag="$rs_sampler_tag"
@@ -156,7 +156,7 @@ if [ "$mode" = "cf" ]; then
     fi
 fi
 
-cmd=$(printf '%q ' uv run python -m src.sampling.sample_meanflow "${ARGS[@]}")
+cmd=$(printf '%q ' uv run python -m src.sampling.sample_improved_meanflow "${ARGS[@]}")
 cmd="${cmd% }"
 
 sbatch <<EOF
