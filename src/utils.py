@@ -380,13 +380,13 @@ def _save_image_grid(
 
 def _get_class_schema() -> dict[str, Any]:
     try:
-        from data_handle.datasets import CLASS_SCHEMA  # old path
+        from src.data_handle.embed import CLASS_SCHEMA  # old path
         return CLASS_SCHEMA
     except Exception:
         pass
 
     try:
-        from data_handle.datasets import CLASS_SCHEMA  # possible future path
+        from src.data_handle.embed import CLASS_SCHEMA  # possible future path
         return CLASS_SCHEMA
     except Exception:
         pass

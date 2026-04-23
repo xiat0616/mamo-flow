@@ -10,7 +10,7 @@ from matplotlib import colormaps
 from torchvision.transforms.functional import to_pil_image
 from torchvision.utils import save_image
 
-from src.data_handle.datasets import (
+from src.data_handle.embed import (
     CLASS_SCHEMA,
     get_embed,
     get_dataloaders,

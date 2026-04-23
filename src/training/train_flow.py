@@ -9,7 +9,7 @@ from torch.nn.parallel.distributed import DistributedDataParallel
 from tqdm import tqdm
 
 import wandb
-from src.data_handle.datasets import CLASS_SCHEMA, get_embed, get_dataloaders, DataLoaderConfig, DatasetConfig
+from src.data_handle.embed import CLASS_SCHEMA, get_embed, get_dataloaders, DataLoaderConfig, DatasetConfig
 from src.utils import (
     ModelEMA,
     get_mc_stats,

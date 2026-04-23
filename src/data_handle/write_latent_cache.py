@@ -47,7 +47,6 @@ def preprocess_breast(image_path: str | os.PathLike) -> np.ndarray:
     image[~mask] = 0
     return image.astype(np.uint8)
 
-
 # ============================================================
 # split csv dataset
 # ============================================================
