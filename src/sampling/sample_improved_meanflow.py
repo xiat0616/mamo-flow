@@ -19,7 +19,7 @@ from src.models.embedder import (
 )
 from src.models.unet_mf import UNet
 from src.flows.meanflow import (
-    MeanFlow,
+    ImprovedMeanFlow,
     MeanFlowConfig,
     SampleConfig,
     BlockConfig,
@@ -168,7 +168,7 @@ def _get_mf_arg(train_args: argparse.Namespace, mf_name: str, plain_name: str, d
     return default
 
 
-def build_meanflow_model_from_ckpt_args(
+def build_improved_meanflow_model_from_ckpt_args(
     train_args: argparse.Namespace,
     device: torch.device,
 ) -> nn.Module:
@@ -227,7 +227,7 @@ def build_meanflow_model_from_ckpt_args(
         adaptive_weight_eps=_get_mf_arg(train_args, "mf_adaptive_weight_eps", "adaptive_weight_eps", 1e-3),
     )
 
-    model = MeanFlow(
+    model = ImprovedMeanFlow(
         forward_nn=forward_nn,
         cond_embedder=cond_embedder,
         p_uncond=getattr(train_args, "p_uncond", 0.0),
@@ -419,7 +419,7 @@ def generate_random_from_noise(
     if not hasattr(model, "sample"):
         raise AttributeError(
             "Random generation requires model.sample(...), "
-            "but the current MeanFlow model does not expose it."
+            "but the current ImprovedMeanFlow model does not expose it."
         )
     return model.sample(
         noise,
@@ -442,7 +442,7 @@ def invert_to_noise_ode(
     if not hasattr(model, "ode_solve"):
         raise AttributeError(
             "Counterfactual inversion requires model.ode_solve(...), "
-            "but the current MeanFlow model does not expose it."
+            "but the current ImprovedMeanFlow model does not expose it."
         )
 
     t = build_time_grid("backward", x.device, ode_steps)
@@ -485,7 +485,7 @@ def get_rs_sampler_tag(
     null_keys: list[str] | None,
 ) -> str:
     cfg_tag = get_cfg_tag(cfg_mode, cfg_scale, null_keys)
-    return f"mf_steps-{sample_steps}_{cfg_tag}"
+    return f"imf_steps-{sample_steps}_{cfg_tag}"
 
 
 def get_cf_sampler_tag(
@@ -507,7 +507,7 @@ def get_cf_sampler_tag(
             f"_rtol-{_format_float_tag(ode_rtol)}"
         )
 
-    rs_tag = f"mf_steps-{sample_steps}"
+    rs_tag = f"imf_steps-{sample_steps}"
     cfg_tag = get_cfg_tag(cfg_mode, cfg_scale, null_keys)
     return f"{inv_tag}_{rs_tag}_{cfg_tag}"
 
@@ -885,7 +885,7 @@ def main():
         type=str,
         default="rs",
         choices=["rs", "cf"],
-        help="rs: random sampling with MeanFlow.sample(...); cf: experimental ODE inversion + MeanFlow sampling.",
+        help="rs: random sampling with ImprovedMeanFlow.sample(...); cf: experimental ODE inversion + ImprovedMeanFlow sampling.",
     )
     parser.add_argument(
         "--cond_source",
@@ -947,7 +947,7 @@ def main():
     if args.split_dir is not None:
         train_args.split_dir = args.split_dir
 
-    model = build_meanflow_model_from_ckpt_args(train_args, device)
+    model = build_improved_meanflow_model_from_ckpt_args(train_args, device)
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
     maybe_apply_ema(
         model=model,
@@ -964,8 +964,6 @@ def main():
         cfg_scale=args.cfg_scale,
         null_keys=args.null_keys,
     )
-    # ode_solve in your current MeanFlow mainly uses pa/null_keys;
-    # keep this conservative for inversion.
     ode_sample_args = make_sample_args(
         cfg_mode="none",
         cfg_scale=1.0,

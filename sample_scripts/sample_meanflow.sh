@@ -1,9 +1,10 @@
 #!/bin/bash
-exp_name="mammo256_gpus48_flow_embed_256_192_condemb_per_attr_mchannel_64_puncond_0.2"
+exp_name="mammo256_gpus48_meanflow_embed_256_192_condemb_per_attr_mchannel_64_puncond_0.2_rneqt_0.25_lognorm"
 ckpt_file="best_checkpoint.pt"
-mode="${1:?Please provide mode: random or cf}"   # random or cf
-do_key="${2:-none}"                              # for cf key: view, cview, density
-do_mode="${3:-flip}"                             # for cf mode: flip, null, or random
+
+mode="${1:cf}"   # rs or cf
+do_key="${2:-none}"                          # for cf key: view, cview, density
+do_mode="${3:-flip}"                         # for cf mode: flip, null, or random
 
 project_root="/vol/biomedic3/tx1215/mamo-flow"
 save_root="${project_root}/sampling_results"
@@ -23,10 +24,25 @@ batch_size=4
 split="valid"
 use_ema=1
 cond_source="dataset"
+seed=0
 
-# # Adaptive solver example:
+# ----------------------------
+# MeanFlow sampling config
+# ----------------------------
+sample_steps=1
+
+# CFG for MeanFlow.sample(...)
+cfg_mode="none"         # none or cfg
+cfg_scale="1.0"
+null_keys=()            # e.g. ("density") or ("view" "density")
+
+# ----------------------------
+# Experimental CF inversion config
+# Only used when mode=cf
+# ----------------------------
+# Adaptive solver example:
 # ode_method="dopri5"
-# ode_atol="1e-5"sampling_results/mammo256_gpus48_flow_embed_256_192_condemb_per_attr_mchannel_64_puncond_0.2/best_checkpoint/ode-dopri5_atol-1e-5_rtol-1e-5/cfs/view
+# ode_atol="1e-5"
 # ode_rtol="1e-5"
 # ode_steps=""
 
@@ -51,21 +67,44 @@ PY
 
 ckpt_tag="${ckpt_file%.*}"
 
+# -------------------------------
+# Match sample_meanflow.py tag logic
+# -------------------------------
+cfg_tag="no_cfg"
+if [ "$cfg_mode" != "none" ]; then
+    cfg_tag="${cfg_mode}_w-${cfg_scale}"
+fi
+
+if [ "${#null_keys[@]}" -gt 0 ]; then
+    null_joined="$(printf '%s\n' "${null_keys[@]}" | sort | paste -sd '_' -)"
+    cfg_tag="${cfg_tag}_null-${null_joined}"
+fi
+
+rs_sampler_tag="mf_steps-${sample_steps}_${cfg_tag}"
+
 if [ -n "$ode_steps" ]; then
-    sampler_tag="ode-${ode_method}_steps-${ode_steps}"
+    inv_tag="invode-${ode_method}_steps-${ode_steps}"
 else
     ode_atol_tag="$(format_float_tag "$ode_atol")"
     ode_rtol_tag="$(format_float_tag "$ode_rtol")"
-    sampler_tag="ode-${ode_method}_atol-${ode_atol_tag}_rtol-${ode_rtol_tag}"
+    inv_tag="invode-${ode_method}_atol-${ode_atol_tag}_rtol-${ode_rtol_tag}"
 fi
 
+cf_sampler_tag="${inv_tag}_mf_steps-${sample_steps}_${cfg_tag}"
+
 if [ "$mode" = "rs" ]; then
+    sampler_tag="$rs_sampler_tag"
+
     cond_tag="cond_dataset"
     if [ "$cond_source" = "none" ]; then
         cond_tag="uncond"
     fi
+
     run_dir="${save_root}/${exp_name}/${ckpt_tag}/${sampler_tag}/randoms/${cond_tag}"
+
 elif [ "$mode" = "cf" ]; then
+    sampler_tag="$cf_sampler_tag"
+
     if [ "$do_mode" = "null" ]; then
         run_dir="${save_root}/${exp_name}/${ckpt_tag}/${sampler_tag}/reconstructions/null"
     else
@@ -84,18 +123,17 @@ ARGS=(
     --split_dir "$split_dir"
     --num_samples "$num_samples"
     --batch_size "$batch_size"
-    --seed 0
+    --seed "$seed"
     --split "$split"
-    --ode_method "$ode_method"
     --mode "$mode"
     --cond_source "$cond_source"
+    --sample_steps "$sample_steps"
+    --cfg_mode "$cfg_mode"
+    --cfg_scale "$cfg_scale"
 )
 
-if [ -n "$ode_steps" ]; then
-    ARGS+=(--ode_steps "$ode_steps")
-else
-    ARGS+=(--ode_atol "$ode_atol")
-    ARGS+=(--ode_rtol "$ode_rtol")
+if [ "${#null_keys[@]}" -gt 0 ]; then
+    ARGS+=(--null_keys "${null_keys[@]}")
 fi
 
 if [ "$use_ema" = "1" ]; then
@@ -104,12 +142,21 @@ fi
 
 if [ "$mode" = "cf" ]; then
     ARGS+=(--do_mode "$do_mode")
+    ARGS+=(--ode_method "$ode_method")
+
+    if [ -n "$ode_steps" ]; then
+        ARGS+=(--ode_steps "$ode_steps")
+    else
+        ARGS+=(--ode_atol "$ode_atol")
+        ARGS+=(--ode_rtol "$ode_rtol")
+    fi
+
     if [ "$do_mode" != "null" ] && [ "$do_key" != "none" ]; then
         ARGS+=(--do_key "$do_key")
     fi
 fi
 
-cmd=$(printf '%q ' uv run python -m src.sampling.sample_flow "${ARGS[@]}")
+cmd=$(printf '%q ' uv run python -m src.sampling.sample_meanflow "${ARGS[@]}")
 cmd="${cmd% }"
 
 sbatch <<EOF
