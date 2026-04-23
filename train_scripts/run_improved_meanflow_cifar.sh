@@ -1,10 +1,10 @@
 #!/bin/bash
 
-base_name="${1:-flow}"
+base_name="${1:-improved_meanflow}"
 partition="${2:-gpus24}"
 
 # ----------------------------
-# CIFAR-10 config
+# Core experiment config
 # ----------------------------
 dataset="cifar10"
 data_dir="/vol/biomedic3/tx1215/mamo-flow/assets/cifar10"
@@ -15,19 +15,32 @@ img_channels=3
 
 cond_embedder="per_attr"
 model_channels=128
-cond_embed_dim=64
+cond_embed_dim=128
 p_uncond=0.2
 
 epochs=10000
-bs=512
+bs=128
 lr=1e-4
 
 valid_frac=0.05
 split_seed=33
 
-exp_name="${base_name}_${dataset}_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
+# ----------------------------
+# iMF training hyperparams
+# ----------------------------
+mf_ratio_r_neq_t=0.25
+mf_time_sampler="lognorm"
+mf_lognorm_mu=-0.4
+mf_lognorm_sigma=1.0
+mf_adaptive_weight_p=1.0
+mf_adaptive_weight_eps=1e-3
 
-mkdir -p "/vol/biomedic3/tx1215/mamo-flow/checkpoints"
+# Eval-time sampling intervals for plots only.
+sample_steps=1
+
+exp_name="${base_name}_${dataset}_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}_rneqt_${mf_ratio_r_neq_t}_${mf_time_sampler}"
+
+mkdir -p /vol/biomedic3/tx1215/mamo-flow/checkpoints
 mkdir -p "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name"
 
 ARGS=(
@@ -35,7 +48,7 @@ ARGS=(
     --dataset="$dataset"
     --data_dir="$data_dir"
     --save_dir="/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name"
-    --parents y # CIFAR-10 has only one label (the class), so we use that as the conditioning variable
+    --parents y # CIFAR-10 has only the label as a conditioning attribute
     --valid_frac="$valid_frac"
     --split_seed="$split_seed"
     --img_height="$img_height"
@@ -43,7 +56,6 @@ ARGS=(
     --img_channels="$img_channels"
 
 # TRAIN
-    --resume=
     --exp_name="$exp_name"
     --seed=6
     --epochs="$epochs"
@@ -59,12 +71,18 @@ ARGS=(
     --prefetch_factor=4
     --dist
 
-# FLOW
-    --alpha=1.0
-    --sigma=0.0
-    --T=150
+# SAMPLING / CFG
+    --sample_steps="$sample_steps"
     --p_uncond="$p_uncond"
     --cond_embedder="$cond_embedder"
+
+# MEANFLOW / IMF CONFIG
+    --mf_ratio_r_neq_t="$mf_ratio_r_neq_t"
+    --mf_time_sampler="$mf_time_sampler"
+    --mf_lognorm_mu="$mf_lognorm_mu"
+    --mf_lognorm_sigma="$mf_lognorm_sigma"
+    --mf_adaptive_weight_p="$mf_adaptive_weight_p"
+    --mf_adaptive_weight_eps="$mf_adaptive_weight_eps"
 
 # MODEL
     unet
@@ -83,11 +101,7 @@ ARGS=(
     --clip_act=256
 )
 
-# ----------------------------
-# Slurm / local launch
-# ----------------------------
-
-NPROC_PER_NODE=2
+NPROC_PER_NODE=4
 
 if [ "$partition" = "gpus48" ]; then
     sbatch <<EOF
@@ -96,9 +110,10 @@ if [ "$partition" = "gpus48" ]; then
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
 #SBATCH --output=/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/slurm.%j.log
 
-source ~/.bashrc
 cd /vol/biomedic3/tx1215/mamo-flow
 uv sync --frozen
+
+source ~/.bashrc
 
 nvidia-smi
 export OMP_NUM_THREADS=${NPROC_PER_NODE}
@@ -113,7 +128,7 @@ srun uv run torchrun \
     --rdzv_id="\$SLURM_JOB_ID" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="\$MASTER_ADDR:\$MASTER_PORT" \
-    -m src.training.train_flow ${ARGS[@]} | tee "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/log.out"
+    -m src.training.train_improved_meanflow ${ARGS[@]} | tee "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/log.out"
 EOF
 
 elif [ "$partition" = "gpus24" ]; then
@@ -123,9 +138,10 @@ elif [ "$partition" = "gpus24" ]; then
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
 #SBATCH --output=/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/slurm.%j.log
 
-source ~/.bashrc
 cd /vol/biomedic3/tx1215/mamo-flow
 uv sync --frozen
+
+source ~/.bashrc
 
 nvidia-smi
 export OMP_NUM_THREADS=${NPROC_PER_NODE}
@@ -139,7 +155,7 @@ srun uv run torchrun \
     --rdzv_id="\$SLURM_JOB_ID" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="\$MASTER_ADDR:\$MASTER_PORT" \
-    -m src.training.train_flow ${ARGS[@]} | tee "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/log.out"
+    -m src.training.train_improved_meanflow ${ARGS[@]} | tee "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/log.out"
 EOF
 
 else
@@ -159,5 +175,5 @@ else
         --rdzv_id="${RDZV_ID}" \
         --rdzv_backend=c10d \
         --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
-        -m src.training.train_flow "${ARGS[@]}" | tee "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/log.out"
+        -m src.training.train_improved_meanflow ${ARGS[@]} | tee "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/log.out"
 fi

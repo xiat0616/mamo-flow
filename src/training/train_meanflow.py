@@ -9,16 +9,10 @@ from torch.nn.parallel.distributed import DistributedDataParallel
 from tqdm import tqdm
 
 import wandb
-from src.data_handle.embed import (
-    CLASS_SCHEMA,
-    get_embed,
-    get_dataloaders,
-    DataLoaderConfig,
-    DatasetConfig,
-)
 from src.utils import (
     ModelEMA,
     get_mc_stats,
+    get_pretrained_flux2vae,
     save_plots_mf,
     seed_all,
     setup_distributed,
@@ -35,6 +29,86 @@ def parse_hw(s: str) -> tuple[int, int]:
             f"Invalid resolution '{s}'. Expected format like 128x96."
         ) from e
 
+
+def build_datasets_and_dataloaders(args: argparse.Namespace):
+    if args.dataset == "embed":
+        from src.data_handle.embed import (
+            CLASS_SCHEMA as EMBED_CLASS_SCHEMA,
+            get_embed,
+            get_dataloaders as get_embed_dataloaders,
+            DataLoaderConfig as EmbedDataLoaderConfig,
+            DatasetConfig as EmbedDatasetConfig,
+        )
+
+        if args.split_dir is None:
+            raise ValueError("--split_dir is required for --dataset embed")
+
+        if args.parents is None:
+            args.parents = list(EMBED_CLASS_SCHEMA)
+
+        datasets = get_embed(
+            EmbedDatasetConfig(
+                data_dir=args.data_dir,
+                split_dir=args.split_dir,
+                cache_dir=args.cache_dir,
+                parents=args.parents,
+                img_height=args.img_height,
+                img_width=args.img_width,
+                img_channels=args.img_channels,
+                vae_ckpt=args.vae_ckpt,
+            )
+        )
+        dataloaders = get_embed_dataloaders(
+            EmbedDataLoaderConfig(
+                bs=args.bs,
+                num_workers=args.num_workers,
+                prefetch_factor=args.prefetch_factor,
+                seed=args.seed,
+                resume_step=getattr(args, "resume_step", 0),
+            ),
+            datasets,
+        )
+        return datasets, dataloaders
+
+    if args.dataset == "cifar10":
+        from src.data_handle.cifar import (
+            get_cifar10,
+            get_dataloaders as get_cifar_dataloaders,
+            DataLoaderConfig as CifarDataLoaderConfig,
+            DatasetConfig as CifarDatasetConfig,
+        )
+
+        if args.parents is None:
+            args.parents = ["y"]
+        elif args.parents != ["y"]:
+            raise ValueError(
+                f"For --dataset cifar10, expected --parents y, got {args.parents}"
+            )
+
+        datasets = get_cifar10(
+            CifarDatasetConfig(
+                data_dir=args.data_dir,
+                valid_frac=args.valid_frac,
+                split_seed=args.split_seed,
+                img_height=args.img_height,
+                img_width=args.img_width,
+                img_channels=args.img_channels,
+                use_labels_as_pa=True,
+            )
+        )
+        dataloaders = get_cifar_dataloaders(
+            CifarDataLoaderConfig(
+                bs=args.bs,
+                num_workers=args.num_workers,
+                prefetch_factor=args.prefetch_factor,
+                seed=args.seed,
+                resume_step=getattr(args, "resume_step", 0),
+            ),
+            datasets,
+        )
+        return datasets, dataloaders
+
+    raise ValueError(f"Unknown dataset: {args.dataset}")
 
 
 class Trainer:
@@ -88,6 +162,7 @@ class Trainer:
                 x = (x + (torch.rand_like(x) - 0.5) / 255.0).clamp(0, 1) * 2 - 1
 
             self.optimizer.zero_grad(set_to_none=True)
+
             result = self.model(x, pa, g=None)
             loss, raw_mse = result if isinstance(result, tuple) else (result, None)
             loss.backward()
@@ -172,10 +247,8 @@ class Trainer:
 
         return (total_loss / n).item()
 
-    # CRITICAL FIX: use @torch.no_grad() instead of @torch.inference_mode().
-    # torch.func.jvp uses forward-mode AD which requires dual tensors —
-    # inference_mode() creates inference tensors that block this.
-    # no_grad() only disables the reverse-mode tape, which is fine.
+    # Important: use no_grad(), not inference_mode(), because MeanFlow eval may
+    # rely on forward-mode AD / JVP.
     @torch.no_grad()
     def eval_epoch(
         self,
@@ -198,6 +271,8 @@ class Trainer:
             pa = {k: v.to(self.device, non_blocking=True) for k, v in pa.items()}
 
             loss = self.model(x, pa, g=g)
+            if isinstance(loss, tuple):
+                loss = loss[0]
 
             n += bs
             total_loss += loss.detach() * bs
@@ -241,13 +316,20 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # DATA
     # ------------------------------------------------------------------
-    parser.add_argument("--dataset", type=str, default=None)
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="embed",
+        choices=["embed", "cifar10"],
+    )
     parser.add_argument("--data_dir", type=str, default=None)
-    parser.add_argument("--split_dir", type=str, required=True)
-    parser.add_argument("--cache_dir", type=str, default=None)
+    parser.add_argument("--split_dir", type=str, default=None)   # embed only
+    parser.add_argument("--cache_dir", type=str, default=None)   # embed only
     parser.add_argument("--save_dir", type=str, default=None)
     parser.add_argument("--vae_ckpt", type=str, default=None)
-    parser.add_argument("--parents", nargs="+", type=str, default=list(CLASS_SCHEMA))
+    parser.add_argument("--parents", nargs="+", type=str, default=None)
+    parser.add_argument("--valid_frac", type=float, default=0.05)   # cifar only
+    parser.add_argument("--split_seed", type=int, default=33)       # cifar only
     parser.add_argument("--img_height", type=int, default=512)
     parser.add_argument("--img_width", type=int, default=384)
     parser.add_argument("--img_channels", type=int, default=1)
@@ -339,6 +421,8 @@ if __name__ == "__main__":
         parser.set_defaults(**ckpt["args"])
         args = parser.parse_args()
         args.resume_step = int(ckpt.get("step", 0))
+    else:
+        args.resume_step = 0
 
     if args.model is None:
         parser.error("Missing required subcommand: model (i.e. unet or transformer)")
@@ -348,8 +432,8 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     _dist_out = setup_distributed() if args.dist else None
     if _dist_out is not None:
-        _local_rank, rank, world_size = _dist_out
-        device = torch.device(f"cuda:{_local_rank}")
+        local_rank, rank, world_size = _dist_out
+        device = torch.device(f"cuda:{local_rank}")
     else:
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         rank, world_size = 0, 1
@@ -370,28 +454,7 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Data
     # ------------------------------------------------------------------
-    datasets = get_embed(
-        DatasetConfig(
-            data_dir=args.data_dir,
-            split_dir=args.split_dir,
-            cache_dir=args.cache_dir,
-            parents=args.parents,
-            img_height=args.img_height,
-            img_width=args.img_width,
-            img_channels=args.img_channels,
-            vae_ckpt=args.vae_ckpt,
-        )
-    )
-    dataloaders = get_dataloaders(
-        DataLoaderConfig(
-            bs=args.bs,
-            num_workers=args.num_workers,
-            prefetch_factor=args.prefetch_factor,
-            seed=args.seed,
-            resume_step=getattr(args, "resume_step", 0),
-        ),
-        datasets,
-    )
+    datasets, dataloaders = build_datasets_and_dataloaders(args)
 
     # ------------------------------------------------------------------
     # Build MeanFlow model
@@ -517,15 +580,15 @@ if __name__ == "__main__":
 
     vae = None
     if rank == 0:
-        wandb.init(project="mammo_flow", name=args.exp_name, config=vars(args))
+        project_name = "mammo_meanflow" if args.dataset == "embed" else "cifar_meanflow"
+        wandb.init(project=project_name, name=args.exp_name, config=vars(args))
         for k, v in vars(args).items():
             print(f"--{k}={v}")
 
         num_params = sum(p.numel() for p in unwrap(model).parameters() if p.requires_grad)
         print(f"#params: {num_params:,}")
 
-        if args.vae_ckpt == "flux2":
-            from utils import get_pretrained_flux2vae
+        if args.dataset == "embed" and args.vae_ckpt == "flux2":
             vae = get_pretrained_flux2vae()
 
     print("\ntorch:", torch.__version__)

@@ -523,7 +523,7 @@ if __name__ == "__main__":
 
     vae = None
     if rank == 0:
-        project_name = "mammo_flow" if args.dataset == "embed" else "meanflow_cifar"
+        project_name = "mammo_flow" if args.dataset == "embed" else "cifar_flow"
         wandb.init(project=project_name, name=args.exp_name, config=vars(args))
         for k, v in vars(args).items():
             print(f"--{k}={v}")

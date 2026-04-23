@@ -5,6 +5,8 @@ base_name="${1:-improved_meanflow}"
 # ----------------------------
 # Core experiment config
 # ----------------------------
+dataset="embed"
+
 img_height=128
 img_width=96
 img_channels=1
@@ -35,17 +37,18 @@ mf_adaptive_weight_eps=1e-3
 # This is NOT the training discretization.
 sample_steps=1
 
-exp_name="${base_name}_improved_meanflow_embed_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}_rneqt_${mf_ratio_r_neq_t}_${mf_time_sampler}"
+exp_name="${base_name}_${dataset}_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}_rneqt_${mf_ratio_r_neq_t}_${mf_time_sampler}"
 
-mkdir -p ../checkpoints
-mkdir -p "../checkpoints/$exp_name"
+mkdir -p /vol/biomedic3/tx1215/mamo-flow/checkpoints
+mkdir -p "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name"
 
 
 ARGS=(
 # DATA
+    --dataset="$dataset"
     --data_dir="/vol/biodata/data/Mammo/EMBED/pngs/1024x768"
     --split_dir="/vol/biomedic3/tx1215/mamo-flow/assets/embed_splits_v1"
-    --save_dir="./checkpoints/$exp_name"
+    --save_dir="/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name"
     --parents age view density scanner cview
     --img_height="$img_height"
     --img_width="$img_width"
@@ -102,7 +105,7 @@ if [ "$2" = "gpus48" ]; then
 #!/bin/bash
 #SBATCH --partition=gpus48
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
-#SBATCH --output=../checkpoints/$exp_name/slurm.%j.log
+#SBATCH --output=/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/slurm.%j.log
 
 cd /vol/biomedic3/tx1215/mamo-flow
 uv sync --frozen
@@ -122,7 +125,7 @@ srun uv run torchrun \
     --rdzv_id="\$SLURM_JOB_ID" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="\$MASTER_ADDR:\$MASTER_PORT" \
-    -m src.training.train_improved_meanflow ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
+    -m src.training.train_improved_meanflow ${ARGS[@]} | tee "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/log.out"
 EOF
 
 elif [ "$2" = "gpus24" ]; then
@@ -130,7 +133,7 @@ elif [ "$2" = "gpus24" ]; then
 #!/bin/bash
 #SBATCH --partition=gpus24
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
-#SBATCH --output=../checkpoints/$exp_name/slurm.%j.log
+#SBATCH --output=/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/slurm.%j.log
 
 cd /vol/biomedic3/tx1215/mamo-flow
 uv sync --frozen
@@ -148,7 +151,7 @@ srun uv run torchrun \
     --rdzv_id="\$SLURM_JOB_ID" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="\$MASTER_ADDR:\$MASTER_PORT" \
-    -m src.training.train_improved_meanflow ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
+    -m src.training.train_improved_meanflow ${ARGS[@]} | tee "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/log.out"
 EOF
 
 
@@ -158,7 +161,7 @@ elif [ "$2" = "gpus" ]; then
 #SBATCH --partition=gpus
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
 #SBATCH --nodelist=lory
-#SBATCH --output=../checkpoints/$exp_name/slurm.%j.log
+#SBATCH --output=/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/slurm.%j.log
 
 cd /vol/biomedic3/tx1215/mamo-flow
 uv sync --frozen
@@ -177,7 +180,7 @@ srun uv run torchrun \
     --rdzv_id="\$SLURM_JOB_ID" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="\$MASTER_ADDR:\$MASTER_PORT" \
-    -m src.training.train_improved_meanflow ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
+    -m src.training.train_improved_meanflow ${ARGS[@]} | tee "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/log.out"
 EOF
 
 
@@ -197,5 +200,5 @@ else
         --rdzv_id="${RDZV_ID}" \
         --rdzv_backend=c10d \
         --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
-        -m src.training.train_improved_meanflow ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
+        -m src.training.train_improved_meanflow ${ARGS[@]} | tee "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/log.out"
 fi

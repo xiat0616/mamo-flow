@@ -3,6 +3,8 @@
 base_name="${1:-flow}"
 
 # ----------------------------
+dataset="embed"
+
 img_height=256
 img_width=192
 cond_embedder="per_attr"
@@ -15,16 +17,17 @@ epochs=10000
 bs=48
 lr=1e-4
 
-exp_name="${base_name}_flow_embed_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
+exp_name="${base_name}_${dataset}_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
 
-mkdir -p ../checkpoints
-mkdir -p "../checkpoints/$exp_name"   # must be unique
+mkdir -p /vol/biomedic3/tx1215/mamo-flow/checkpoints
+mkdir -p "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name"   # must be unique
 
 ARGS=(
 # DATA
+    --dataset="$dataset"
     --data_dir="/vol/biodata/data/Mammo/EMBED/pngs/1024x768"
     --split_dir="/vol/biomedic3/tx1215/mamo-flow/assets/embed_splits_v1"
-    --save_dir="./checkpoints/$exp_name"
+    --save_dir="/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name"
     --parents age view density scanner cview
     --img_height=$img_height
     --img_width=$img_width
@@ -110,7 +113,7 @@ srun uv run torchrun \
     --rdzv_id="\$SLURM_JOB_ID" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="\$MASTER_ADDR:\$MASTER_PORT" \
-    -m src.training.train_flow ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
+    -m src.training.train_flow ${ARGS[@]} | tee "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/log.out"
 EOF
 
 elif [ "$2" = "gpus24" ]; then
@@ -118,7 +121,7 @@ elif [ "$2" = "gpus24" ]; then
 #!/bin/bash
 #SBATCH --partition=gpus24
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
-#SBATCH --output=../checkpoints/$exp_name/slurm.%j.log
+#SBATCH --output=/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/slurm.%j.log
 
 source ~/.bashrc
 cd /vol/biomedic3/tx1215/mamo-flow
@@ -136,7 +139,7 @@ srun uv run torchrun \
     --rdzv_id="\$SLURM_JOB_ID" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="\$MASTER_ADDR:\$MASTER_PORT" \
-    -m src.training.train_flow ${ARGS[@]} | tee "./checkpoints/$exp_name/log.out"
+    -m src.training.train_flow ${ARGS[@]} | tee "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/log.out"
 EOF
 
 else
@@ -153,5 +156,5 @@ else
         --rdzv_id="${RDZV_ID}" \
         --rdzv_backend=c10d \
         --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
-        -m src.training.train_flow "${ARGS[@]}" | tee "./checkpoints/$exp_name/log.out"
+        -m src.training.train_flow "${ARGS[@]}" | tee "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name/log.out"
 fi
