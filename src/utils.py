@@ -36,7 +36,20 @@ DEFAULT_IDX_TO_NAME: dict[str, list[str]] = {
         "Clearview CSm",
         "Senographe Essential",
     ],
+    "y": [
+        "airplane",
+        "automobile",
+        "bird",
+        "cat",
+        "deer",
+        "dog",
+        "frog",
+        "horse",
+        "ship",
+        "truck",
+    ],
 }
+
 
 # -----------------------------------------------------------------------------
 # EMA
@@ -379,19 +392,15 @@ def _save_image_grid(
 
 
 def _get_class_schema() -> dict[str, Any]:
+    schema: dict[str, Any] = {}
+
     try:
-        from src.data_handle.embed import CLASS_SCHEMA  # old path
-        return CLASS_SCHEMA
+        from src.data_handle.embed import CLASS_SCHEMA as EMBED_CLASS_SCHEMA
+        schema.update(EMBED_CLASS_SCHEMA)
     except Exception:
         pass
 
-    try:
-        from src.data_handle.embed import CLASS_SCHEMA  # possible future path
-        return CLASS_SCHEMA
-    except Exception:
-        pass
-
-    return {}
+    return schema
 
 
 def _sample_random_interventions(
@@ -407,37 +416,54 @@ def _sample_random_interventions(
     do_keys: list[str] = []
     pa_keys = list(pa.keys())
 
-    for i in range(next(iter(pa.values())).shape[0]):
+    batch_size = next(iter(pa.values())).shape[0]
+
+    for i in range(batch_size):
         k = pa_keys[i % len(pa_keys)]
         do_keys.append(k)
 
         y = do_pa[k][i].clone()
         schema_val = class_schema.get(k, None)
-        is_categorical = isinstance(schema_val, numbers.Integral)
+
+        is_onehot = (y.ndim > 0) and (y.numel() > 1)
+
+        if isinstance(schema_val, numbers.Integral):
+            num_classes = int(schema_val)
+            is_categorical = True
+        elif is_onehot:
+            num_classes = int(y.numel())
+            is_categorical = True
+        else:
+            num_classes = None
+            is_categorical = False
 
         if is_categorical:
-            num_classes = int(schema_val)
+            assert num_classes is not None
+
             if num_classes <= 1:
                 do_pa[k][i] = y.clone()
+                continue
+
+            if is_onehot:
+                orig_idx = int(y.argmax().item())
             else:
-                is_onehot = y.shape[-1] > 1
-                orig_idx = int(y.argmax().item()) if is_onehot else int(y.round().item())
+                orig_idx = int(y.round().item())
 
+            new_idx = random.randrange(num_classes)
+            tries = 0
+            while new_idx == orig_idx and tries < 32:
                 new_idx = random.randrange(num_classes)
-                tries = 0
-                while new_idx == orig_idx and tries < 32:
-                    new_idx = random.randrange(num_classes)
-                    tries += 1
-                if new_idx == orig_idx:
-                    new_idx = (orig_idx + 1) % num_classes
+                tries += 1
+            if new_idx == orig_idx:
+                new_idx = (orig_idx + 1) % num_classes
 
-                if is_onehot:
-                    do_y = torch.zeros_like(y)
-                    do_y[new_idx] = 1.0
-                else:
-                    do_y = torch.tensor(new_idx, dtype=y.dtype, device=y.device)
+            if is_onehot:
+                do_y = torch.zeros_like(y)
+                do_y[new_idx] = 1.0
+            else:
+                do_y = torch.tensor(new_idx, dtype=y.dtype, device=y.device)
 
-                do_pa[k][i] = do_y
+            do_pa[k][i] = do_y
         else:
             do_pa[k][i] = torch.rand_like(do_pa[k][i])
 
@@ -663,6 +689,7 @@ def save_plots(
         device=device,
         max_samples=12,
     )
+
     plot_samples(
         torch.randn_like(x),
         pa=pa,
@@ -671,14 +698,16 @@ def save_plots(
         steps=steps,
         file_path=save_path + ".pdf",
     )
-    plot_counterfactuals(
-        x,
-        pa=pa,
-        model=base,
-        vae=vae,
-        steps=steps,
-        file_path=save_path + "_cf.pdf",
-    )
+
+    if len(pa) > 0:
+        plot_counterfactuals(
+            x,
+            pa=pa,
+            model=base,
+            vae=vae,
+            steps=steps,
+            file_path=save_path + "_cf.pdf",
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -776,6 +805,7 @@ def save_plots_mf(
         device=device,
         max_samples=12,
     )
+
     plot_samples_mf(
         torch.randn_like(x),
         pa=pa,
@@ -784,14 +814,16 @@ def save_plots_mf(
         steps=steps,
         file_path=save_path + ".pdf",
     )
-    plot_counterfactuals_mf(
-        x,
-        pa=pa,
-        model=base,
-        vae=vae,
-        steps=steps,
-        file_path=save_path + "_cf.pdf",
-    )
+
+    if len(pa) > 0:
+        plot_counterfactuals_mf(
+            x,
+            pa=pa,
+            model=base,
+            vae=vae,
+            steps=steps,
+            file_path=save_path + "_cf.pdf",
+        )
 
 
 # -----------------------------------------------------------------------------
