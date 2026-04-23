@@ -20,7 +20,7 @@ class DataLoaderConfig:
 
 @dataclass
 class DatasetConfig:
-    data_dir: str = "./data"
+    data_dir: str = "/vol/biomedic3/tx1215/mamo-flow/assets/cifar10/"
     valid_frac: float = 0.05
     split_seed: int = 33
     img_height: int = 32
@@ -29,7 +29,7 @@ class DatasetConfig:
     use_labels_as_pa: bool = True
 
 
-class CIFAR10Dataset(torch.utils.data.Dataset):
+class CIFAR10(torch.utils.data.Dataset):
     def __init__(
         self,
         base_dataset: torch.utils.data.Dataset,
@@ -96,7 +96,7 @@ def split_train_valid(
     return train_subset, valid_subset
 
 
-def get_cifar10(config: DatasetConfig) -> dict[str, CIFAR10Dataset]:
+def get_cifar10(config: DatasetConfig) -> dict[str, CIFAR10]:
     if config.img_channels != 3:
         raise ValueError(
             f"CIFAR-10 expects img_channels=3, got {config.img_channels}"
@@ -128,15 +128,15 @@ def get_cifar10(config: DatasetConfig) -> dict[str, CIFAR10Dataset]:
     )
 
     datasets_dict = {
-        "train": CIFAR10Dataset(
+        "train": CIFAR10(
             train,
             use_labels_as_pa=config.use_labels_as_pa,
         ),
-        "valid": CIFAR10Dataset(
+        "valid": CIFAR10(
             valid,
             use_labels_as_pa=config.use_labels_as_pa,
         ),
-        "test": CIFAR10Dataset(
+        "test": CIFAR10(
             test,
             use_labels_as_pa=config.use_labels_as_pa,
         ),
@@ -194,7 +194,7 @@ def get_dataloaders(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default="./data")
+    parser.add_argument("--data_dir", type=str, default="/vol/biomedic3/tx1215/mamo-flow/assets/cifar10/")
     parser.add_argument("--valid_frac", type=float, default=0.05)
     parser.add_argument("--split_seed", type=int, default=33)
     parser.add_argument("--img_height", type=int, default=32)
