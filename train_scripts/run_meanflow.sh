@@ -34,7 +34,7 @@ mf_adaptive_weight_eps=1e-3
 # This is NOT the training discretization.
 sample_steps=1
 
-exp_name="${base_name}_${dataset}_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}_rneqt_${mf_ratio_r_neq_t}_${mf_time_sampler}"
+exp_name="${dataset}_${base_name}_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}_rneqt_${mf_ratio_r_neq_t}_${mf_time_sampler}"
 
 mkdir -p /vol/biomedic3/tx1215/mamo-flow/checkpoints
 mkdir -p "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name"

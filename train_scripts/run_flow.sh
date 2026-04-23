@@ -17,7 +17,7 @@ epochs=10000
 bs=48
 lr=1e-4
 
-exp_name="${base_name}_${dataset}_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
+exp_name="${dataset}_${base_name}_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
 
 mkdir -p /vol/biomedic3/tx1215/mamo-flow/checkpoints
 mkdir -p "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name"   # must be unique

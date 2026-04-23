@@ -19,13 +19,13 @@ cond_embed_dim=64
 p_uncond=0.2
 
 epochs=10000
-bs=512
+bs=768
 lr=1e-4
 
 valid_frac=0.05
 split_seed=33
 
-exp_name="${base_name}_${dataset}_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
+exp_name="${dataset}_${base_name}_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
 
 mkdir -p "/vol/biomedic3/tx1215/mamo-flow/checkpoints"
 mkdir -p "/vol/biomedic3/tx1215/mamo-flow/checkpoints/$exp_name"
@@ -54,7 +54,7 @@ ARGS=(
     --betas 0.9 0.999
     --eps=1e-8
     --ema_rate=0.9999
-    --eval_freq=5000
+    --eval_freq=1000
     --num_workers=8
     --prefetch_factor=4
     --dist
@@ -87,7 +87,7 @@ ARGS=(
 # Slurm / local launch
 # ----------------------------
 
-NPROC_PER_NODE=2
+NPROC_PER_NODE=1
 
 if [ "$partition" = "gpus48" ]; then
     sbatch <<EOF
