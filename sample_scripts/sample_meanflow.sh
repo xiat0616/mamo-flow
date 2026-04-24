@@ -29,7 +29,7 @@ seed=0
 # ----------------------------
 # MeanFlow sampling config
 # ----------------------------
-sample_steps=10
+sample_steps=5
 
 # CFG for MeanFlow.sample(...)
 cfg_mode="none"         # none or cfg
