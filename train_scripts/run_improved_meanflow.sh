@@ -18,7 +18,7 @@ p_uncond=0.2
 
 epochs=10000
 bs=32
-lr=1e-4
+lr=1e-3
 
 # ----------------------------
 # iMF training hyperparams

@@ -20,7 +20,7 @@ p_uncond=0.2
 
 epochs=10000
 bs=512
-lr=1e-4
+lr=1e-3
 
 valid_frac=0.05
 split_seed=33

@@ -29,7 +29,7 @@ seed=0
 # ----------------------------
 # Improved MeanFlow sampling config
 # ----------------------------
-sample_steps=5
+sample_steps=50
 
 # CFG for ImprovedMeanFlow.sample(...)
 cfg_mode="none"         # none or cfg

@@ -14,7 +14,7 @@ p_uncond=0.2
 # optional: other useful vars
 img_channels=1
 epochs=10000
-bs=192
+bs=320
 lr=1e-3
 
 exp_name="${dataset}_${base_name}_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
@@ -34,7 +34,7 @@ ARGS=(
     --img_channels=$img_channels
 
 # TRAIN
-    --resume=
+    --resume="/vol/biomedic3/tx1215/mamo-flow/checkpoints/embed_flow_128_96_condemb_per_attr_mchannel_32_puncond_0.2/last_checkpoint.pt"
     --exp_name="$exp_name"
     --seed=6
     --epochs=$epochs
@@ -45,7 +45,7 @@ ARGS=(
     --betas 0.9 0.999
     --eps=1e-8
     --ema_rate=0.9999
-    --eval_freq=5000
+    --eval_freq=1000
     --num_workers=8
     --prefetch_factor=4
     --dist
