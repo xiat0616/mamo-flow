@@ -299,6 +299,7 @@ class Trainer:
             "step": self.step,
             "epoch": self.epoch,
         }
+        os.makedirs(self.args.save_dir, exist_ok=True)
         last_path = os.path.join(self.args.save_dir, "last_checkpoint.pt")
         torch.save(ckpt, last_path)
         print(f"=> step: {self.step}, last model saved: {last_path}")
