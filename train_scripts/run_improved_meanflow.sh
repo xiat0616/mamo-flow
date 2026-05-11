@@ -10,7 +10,7 @@ ckpt_root="${project_root}/checkpoints"
 # Resume config
 #
 # Leave empty for fresh training:
-# resume_exp_name=""
+resume_exp_name="mammo128_gpus48_improved_meanflow_embed_128_96_condemb_per_attr_mchannel_64_puncond_0.2_rneqt_0.25_lognorm"
 #
 # Put experiment folder name here for resume training:
 # ============================================================

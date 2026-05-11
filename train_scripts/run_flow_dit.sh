@@ -1,6 +1,6 @@
 #!/bin/bash
 
-base_name="${1:-flow}"
+base_name="${1:-flow_dit}"
 partition="${2:-local}"
 
 project_root="/vol/biomedic3/tx1215/mamo-flow"
@@ -15,9 +15,7 @@ ckpt_root="${project_root}/checkpoints"
 # Put experiment folder name here for resume training:
 # ============================================================
 
-# resume_exp_name="embed_flow_gpus48_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
-resume_exp_name="embed_flow_debug_flip_density_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
-# resume_exp_name=""
+resume_exp_name=""
 
 mkdir -p "$ckpt_root"
 
@@ -29,8 +27,7 @@ mkdir -p "$ckpt_root"
 if [ -n "$resume_exp_name" ]; then
     exp_name="$resume_exp_name"
     save_dir="${ckpt_root}/${exp_name}"
-    # resume_ckpt="${save_dir}/best_checkpoint.pt"
-    resume_ckpt="${save_dir}/last_checkpoint.pt"
+    resume_ckpt="${save_dir}/best_checkpoint.pt"
 
     if [ ! -f "$resume_ckpt" ]; then
         echo "Resume checkpoint not found: $resume_ckpt"
@@ -47,7 +44,6 @@ if [ -n "$resume_exp_name" ]; then
         --resume="$resume_ckpt"
         --exp_name="$exp_name"
         --save_dir="$save_dir"
-        --lr=1e-4
     )
 
 # ============================================================
@@ -57,25 +53,33 @@ if [ -n "$resume_exp_name" ]; then
 else
     dataset="embed"
 
+    # ---- pixel-space defaults ----
+    # For latent space: set img_height/img_width to latent spatial dims,
+    # img_channels to latent depth (e.g. 16 for raddino, 32 for flux2),
+    # and add --cache_dir pointing to your memmap cache.
     img_height=128
     img_width=96
-
-    # img_height=256
-    # img_width=192
+    img_channels=1
 
     cond_embedder="per_attr"
-
-    model_channels=32
-    # model_channels=64
-
     p_uncond=0.2
 
-    img_channels=1
     epochs=10000
-    bs=320
-    lr=1e-3
+    bs=64
+    lr=1e-4
 
-    exp_name="${dataset}_${base_name}_${img_height}_${img_width}_condemb_${cond_embedder}_mchannel_${model_channels}_puncond_${p_uncond}"
+    # ---- DiT architecture ----
+    # patch_size=8 on 128x96 → 16x12=192 patches (good for pixel space)
+    # For latent 32x24: patch_size=2 → 16x12=192 patches
+    # For latent 32x24: patch_size=4 → 8x6=48 patches
+    patch_size=8
+    hidden_size=768   # DiT-B: 768 / DiT-L: 1024 / DiT-XL: 1152
+    depth=12          # DiT-B: 12  / DiT-L: 24   / DiT-XL: 28
+    num_heads=12      # hidden_size must be divisible by num_heads
+    mlp_ratio=2.6667  # 8/3
+    cond_embed_dim=256
+
+    exp_name="${dataset}_${base_name}_${img_height}_${img_width}_h${hidden_size}_d${depth}_p${patch_size}_puncond_${p_uncond}"
     save_dir="${ckpt_root}/${exp_name}"
 
     echo "Fresh training mode enabled"
@@ -92,6 +96,7 @@ else
         --img_height=$img_height
         --img_width=$img_width
         --img_channels=$img_channels
+        # --cache_dir="/path/to/latent/cache"   # uncomment for latent mode
 
     # TRAIN
         --resume=""
@@ -118,30 +123,20 @@ else
         --cond_embedder=$cond_embedder
 
     # MODEL
-        unet
-        --model_channels=$model_channels
-        --channel_mult 1 2 4 6
-        --cond_embed_dim=160
-        --num_blocks=3
-        --attn_resolutions 16x12
-        --label_balance=0.5
-        --concat_balance=0.5
-        --resample_filter 1 1
-        --channels_per_head=64
-        --dropout=0.0
-        --res_balance=0.3
-        --attn_balance=0.3
-        --clip_act=256
+        dit
+        --hidden_size=$hidden_size
+        --depth=$depth
+        --num_heads=$num_heads
+        --patch_size=$patch_size
+        --mlp_ratio=$mlp_ratio
+        --cond_embed_dim=$cond_embed_dim
+        # --grad_checkpointing   # uncomment for large models (DiT-L/XL) to save memory
     )
 fi
 
 mkdir -p "$save_dir"
 
 NPROC_PER_NODE=2
-
-# export NCCL_P2P_LEVEL=LOC
-# export NCCL_P2P_DISABLE=1
-
 
 if [ "$partition" = "gpus48" ]; then
     sbatch <<EOF

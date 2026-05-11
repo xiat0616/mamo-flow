@@ -381,6 +381,15 @@ if __name__ == "__main__":
     p_unet.add_argument("--attn_balance", type=float, default=0.3)
     p_unet.add_argument("--clip_act", type=int, default=256)
 
+    p_dit = sub.add_parser("dit")
+    p_dit.add_argument("--hidden_size", type=int, default=768)
+    p_dit.add_argument("--depth", type=int, default=12)
+    p_dit.add_argument("--num_heads", type=int, default=12)
+    p_dit.add_argument("--patch_size", type=int, default=2)
+    p_dit.add_argument("--mlp_ratio", type=float, default=8 / 3)
+    p_dit.add_argument("--cond_embed_dim", type=int, default=256)
+    p_dit.add_argument("--grad_checkpointing", action="store_true", default=False)
+
     args = parser.parse_args()
 
     if args.resume:
@@ -392,7 +401,7 @@ if __name__ == "__main__":
         args.resume_step = 0
 
     if args.model is None:
-        parser.error("Missing required subcommand: model (i.e. unet or transformer)")
+        parser.error("Missing required subcommand: model (i.e. unet or dit)")
 
     device, rank, world_size = (
         setup_distributed()
@@ -475,10 +484,56 @@ if __name__ == "__main__":
             p_uncond=args.p_uncond,
             amp_dtype=amp_dtype,
         )
-    elif args.model == "transformer":
-        raise NotImplementedError("Transformer model not implemented yet")
+    elif args.model == "dit":
+        from src.models.embedder import (
+            GlobalCondEmbedder,
+            PerAttrCondEmbedder,
+            CondEmbedderConfig,
+            infer_parent_dims_from_batch,
+        )
+        from src.flows.flow import Flow
+        from src.models.DiT import DiT
+
+        sample_batch = next(iter(dataloaders["train"]))
+        parent_dims = infer_parent_dims_from_batch(sample_batch["pa"], args.parents)
+
+        forward_nn = DiT(
+            img_height=args.img_height,
+            img_width=args.img_width,
+            patch_size=args.patch_size,
+            in_channels=args.img_channels,
+            hidden_size=args.hidden_size,
+            depth=args.depth,
+            num_heads=args.num_heads,
+            mlp_ratio=args.mlp_ratio,
+            cond_embed_dim=args.cond_embed_dim if args.cond_embedder != "none" else 0,
+            grad_checkpointing=args.grad_checkpointing,
+        )
+
+        cond_embedder = None
+        if args.cond_embedder != "none" and len(args.parents) > 0:
+            embedder_config = CondEmbedderConfig(
+                parents=args.parents,
+                parent_dims=parent_dims,
+                cond_embed_dim=args.cond_embed_dim,
+            )
+            if args.cond_embedder == "per_attr":
+                cond_embedder = PerAttrCondEmbedder(embedder_config)
+            elif args.cond_embedder == "global":
+                cond_embedder = GlobalCondEmbedder(embedder_config)
+            else:
+                raise ValueError(f"Unknown cond_embedder: {args.cond_embedder}")
+
+        model = Flow(
+            forward_nn=forward_nn,
+            cond_embedder=cond_embedder,
+            sigma=args.sigma,
+            alpha=args.alpha,
+            p_uncond=args.p_uncond,
+            amp_dtype=amp_dtype,
+        )
     else:
-        raise NotImplementedError
+        raise NotImplementedError(f"Unknown model: {args.model}")
 
     if args.resume:
         model.load_state_dict(ckpt["model_state_dict"], strict=True)

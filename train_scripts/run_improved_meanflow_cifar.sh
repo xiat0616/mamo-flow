@@ -10,7 +10,7 @@ ckpt_root="${project_root}/checkpoints"
 # Resume config
 #
 # Leave empty for fresh training:
-# resume_exp_name=""
+resume_exp_name="cifar10_improved_meanflow_32_32_condemb_per_attr_mchannel_128_puncond_0.2_rneqt_0.25_lognorm"
 #
 # Put experiment folder name here for resume training:
 # ============================================================
@@ -65,7 +65,7 @@ else
 
     epochs=10000
     bs=512
-    lr=1e-3
+    lr=1e-4
 
     valid_frac=0.05
     split_seed=33

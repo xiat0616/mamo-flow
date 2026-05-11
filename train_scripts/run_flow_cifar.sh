@@ -15,7 +15,8 @@ ckpt_root="${project_root}/checkpoints"
 # Put experiment folder name here for resume training:
 # ============================================================
 
-resume_exp_name="cifar10_flow_lr1e-3_32_32_condemb_per_attr_mchannel_128_puncond_0.2"
+# resume_exp_name="cifar10_flow_32_32_condemb_per_attr_mchannel_128_puncond_0.2"
+resume_exp_name="cifar10_flow_32_32_condemb_per_attr_mchannel_128_puncond_0.2"
 
 mkdir -p "$ckpt_root"
 
@@ -27,7 +28,8 @@ mkdir -p "$ckpt_root"
 if [ -n "$resume_exp_name" ]; then
     exp_name="$resume_exp_name"
     save_dir="${ckpt_root}/${exp_name}"
-    resume_ckpt="${save_dir}/best_checkpoint.pt"
+    # resume_ckpt="${save_dir}/best_checkpoint.pt"
+    resume_ckpt="${save_dir}/last_checkpoint.pt"
 
     if [ ! -f "$resume_ckpt" ]; then
         echo "Resume checkpoint not found: $resume_ckpt"
@@ -44,6 +46,9 @@ if [ -n "$resume_exp_name" ]; then
         --resume="$resume_ckpt"
         --exp_name="$exp_name"
         --save_dir="$save_dir"
+        --lr=3e-5
+        --bs=512
+        --eval_freq=5000
     )
 
 # ============================================================
