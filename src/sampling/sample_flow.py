@@ -811,6 +811,9 @@ def save_random_samples(
         d.mkdir(parents=True, exist_ok=True)
 
     vis = ((samples.clamp(-1, 1) + 1.0) / 2.0).cpu()
+
+    print(f"Range of vis: [{vis.min().item():.3f}, {vis.max().item():.3f}]")
+
     pa_cpu = None if pa is None else {k: v.detach().cpu() for k, v in pa.items()}
 
     for i in range(vis.shape[0]):
@@ -1037,6 +1040,8 @@ def main():
                 ode_steps=args.ode_steps,
             )
 
+            print(f"Range of generated random samples: [{samples.min().item():.3f}, {samples.max().item():.3f}]")
+
             save_random_samples(
                 samples=samples,
                 save_dirs=random_save_dirs,
@@ -1054,7 +1059,8 @@ def main():
             except StopIteration:
                 src_iter = get_iterator(train_args, args.batch_size, args.split)
                 batch = next(src_iter)
-
+            
+            
             x_src = preprocess_x_for_sampling(batch["x"][:bs], device)
             
             print(f"Range of source batch images: [{x_src.min().item():.3f}, {x_src.max().item():.3f}]")

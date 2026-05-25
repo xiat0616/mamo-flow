@@ -31,10 +31,10 @@ ode_rtol="1e-5"
 ode_steps=""
 
 # Fixed-step solver example:
-ode_method="midpoint"
-ode_atol=""
-ode_rtol=""
-ode_steps="1000"
+# ode_method="midpoint"
+# ode_atol=""
+# ode_rtol=""
+# ode_steps="1000"
 
 # -------------------------------
 # Helper: match Python _format_float_tag()
