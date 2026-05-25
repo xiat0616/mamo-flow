@@ -476,7 +476,7 @@ class EMBED(torch.utils.data.Dataset):
         if x_np.ndim < 3:
             x_np = x_np[None, ...]
 
-        x = torch.from_numpy(x_np).float()
+        x = torch.from_numpy(x_np).float() #[0,1]
 
         if self.transform is not None:
             x = self.transform(x)

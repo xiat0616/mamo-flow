@@ -842,6 +842,9 @@ def save_counterfactual_samples(
     src_vis = ((x_src.clamp(-1, 1) + 1.0) / 2.0).cpu()
     cf_vis = ((x_cf.clamp(-1, 1) + 1.0) / 2.0).cpu()
 
+    print(f"Range of src_vis: [{src_vis.min().item():.3f}, {src_vis.max().item():.3f}]")
+    print(f"Range of cf_vis: [{cf_vis.min().item():.3f}, {cf_vis.max().item():.3f}]")
+
     pa_src_cpu = {k: v.detach().cpu() for k, v in pa_src.items()}
     pa_cf_cpu = {k: v.detach().cpu() for k, v in pa_cf.items()}
 
@@ -1053,6 +1056,9 @@ def main():
                 batch = next(src_iter)
 
             x_src = preprocess_x_for_sampling(batch["x"][:bs], device)
+            
+            print(f"Range of source batch images: [{x_src.min().item():.3f}, {x_src.max().item():.3f}]")
+
             pa_src = move_pa_to_device(batch["pa"], device)
             pa_src = {k: v[:bs] for k, v in pa_src.items()}
 
@@ -1094,6 +1100,7 @@ def main():
                 ode_rtol=args.ode_rtol,
                 ode_steps=args.ode_steps,
             )
+            print(f"Range of generated samples: [{x_cf.min().item():.3f}, {x_cf.max().item():.3f}]")
 
             save_counterfactual_samples(
                 x_src=x_src,

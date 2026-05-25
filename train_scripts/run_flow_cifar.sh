@@ -204,7 +204,7 @@ else
 
     uv run torchrun \
         --nnodes=1 \
-        --nproc_per_node="${NPROC_PER_NODE}" \
+        --nproc_per_node="${NPROC_PER_NODE}" \ 
         --rdzv_id="${RDZV_ID}" \
         --rdzv_backend=c10d \
         --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \

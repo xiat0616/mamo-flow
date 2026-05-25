@@ -1,7 +1,7 @@
 #!/bin/bash
-exp_name="mammo256_gpus48_flow_embed_256_192_condemb_per_attr_mchannel_64_puncond_0.2"
+exp_name="embed_flow_gpus48_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
 ckpt_file="best_checkpoint.pt"
-mode="${1:?Please provide mode: random or cf}"   # random or cf
+mode="${1:?Please provide mode: rs or cf}"   # random or cf
 do_key="${2:-none}"                              # for cf key: view, cview, density
 do_mode="${3:-flip}"                             # for cf mode: flip, null, or random
 
