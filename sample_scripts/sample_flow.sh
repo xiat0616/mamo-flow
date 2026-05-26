@@ -1,6 +1,7 @@
 #!/bin/bash
-exp_name="embed_flow_gpus48_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
-ckpt_file="best_checkpoint.pt"
+# exp_name="embed_flow_gpus48_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
+exp_name="embed_flow_debug_flip_density_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
+ckpt_file="last_checkpoint.pt"
 mode="${1:?Please provide mode: rs or cf}"   # random or cf
 do_key="${2:-none}"                              # for cf key: view, cview, density
 do_mode="${3:-flip}"                             # for cf mode: flip, null, or random
@@ -18,7 +19,7 @@ fi
 # ----------------------------
 # Sampling config
 # ----------------------------
-num_samples=60
+num_samples=10
 batch_size=4
 split="valid"
 use_ema=1

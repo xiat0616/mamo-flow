@@ -2,13 +2,10 @@ import argparse
 import json
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-from PIL import Image, ImageDraw, ImageFont
-from matplotlib import colormaps
-import matplotlib.pyplot as plt
-from torchvision.transforms.functional import to_pil_image
 from torchvision.utils import save_image
 
 from src.models.embedder import (
@@ -20,6 +17,9 @@ from src.models.embedder import (
 from src.models.unet import UNet
 from src.flows.flow import Flow, BlockConfig, UNetConfig
 from src.utils import ModelEMA, seed_all
+
+
+plt.switch_backend("Agg")
 
 
 DENSITY_LABELS = {0: "A", 1: "B", 2: "C", 3: "D"}
@@ -38,18 +38,22 @@ CIFAR10_LABELS = {
     9: "truck",
 }
 
+
 def to_namespace(d: dict) -> argparse.Namespace:
     return argparse.Namespace(**d)
+
 
 def select_amp_dtype(device: torch.device) -> torch.dtype | None:
     if device.type == "cuda" and torch.cuda.get_device_capability(device)[0] >= 7:
         return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     return None
 
+
 def _format_float_tag(x: float) -> str:
     s = f"{x:.0e}"
     s = s.replace("e-0", "e-").replace("e+0", "e+")
     return s
+
 
 def build_time_grid(
     direction: str,
@@ -72,16 +76,17 @@ def build_time_grid(
         return torch.linspace(1.0, 0.0, ode_steps + 1, device=device)
     raise ValueError(f"Unknown direction: {direction}")
 
+
 def build_dataloaders_from_train_args(
     train_args: argparse.Namespace,
     batch_size: int,
 ) -> dict[str, torch.utils.data.DataLoader]:
     dataset_name = getattr(train_args, "dataset", "embed")
-    
-    #NOTE Monkey code now, as the previously trained flow matching assume EMBED by default.
-    if dataset_name is None: 
-        dataset_name = "embed" 
-         # default to embed if not specified
+
+    # NOTE: Monkey code now, as the previously trained flow matching assume EMBED by default.
+    if dataset_name is None:
+        dataset_name = "embed"
+
     if dataset_name == "embed":
         from src.data_handle.embed import (
             get_embed,
@@ -89,7 +94,7 @@ def build_dataloaders_from_train_args(
             DataLoaderConfig,
             DatasetConfig,
         )
-
+        assert train_args.img_channels == 1, "Embed dataset currently only supports single-channel images. Please set --img_channels 1 when using the embed dataset."
         datasets = get_embed(
             DatasetConfig(
                 data_dir=train_args.data_dir,
@@ -102,6 +107,15 @@ def build_dataloaders_from_train_args(
                 vae_ckpt=getattr(train_args, "vae_ckpt", None),
             )
         )
+
+        # # Check the dataset batch['x'] before building dataloaders, to catch any potential issues early.
+        # sample = datasets["train"][0]
+        # print(f"Sample 'x' shape: {sample['x'].shape}, dtype: {sample['x'].dtype}, value range: [{sample['x'].min().item():.3f}, {sample['x'].max().item():.3f}]")
+        # plt.imshow(sample['x'][0].numpy(), cmap='gray')
+        # plt.title("Sample 'x' Visualization")
+        # plt.axis("off")
+        # plt.savefig("/vol/biomedic3/tx1215/mamo-flow/sample_dataset_image.png")
+        # plt.close()
 
         dataloaders = get_dataloaders(
             DataLoaderConfig(
@@ -252,10 +266,16 @@ def preprocess_x_for_sampling(
     x: torch.Tensor,
     device: torch.device,
 ) -> torch.Tensor:
+    """
+    Match the training preview path:
+        dataloader image [0, 1] -> model image [-1, 1]
+
+    Do not clamp here. This is model input preprocessing, not visualization.
+    """
     x = x.float().to(device, non_blocking=True)
     channels = x.shape[1]
     if channels <= 3:
-        x = x * 2 - 1
+        x = x * 2.0 - 1.0
     return x
 
 
@@ -287,7 +307,7 @@ def _schema_num_classes(
             return None
         return int(spec)
 
-    # Fallback: infer from one-hot tensor
+    # Fallback: infer from one-hot tensor.
     if ref.shape[-1] > 1:
         return int(ref.shape[-1])
 
@@ -648,6 +668,31 @@ def _format_random_hparam_ylabel(
     )
 
 
+def _show_image_matplotlib(ax: plt.Axes, img: torch.Tensor) -> None:
+    """
+    Matplotlib display matching the training plotting style.
+
+    For single-channel images, intentionally do not pass vmin/vmax.
+    Matplotlib then uses auto display scaling, which is why the training
+    plots looked less washed out than direct PIL/to_pil_image rendering.
+    """
+    img = img.detach().cpu().float()
+    # print(f"Image shape: {tuple(img.shape)}, dtype: {img.dtype}, value range: [{img.min().item():.3f}, {img.max().item():.3f}]")
+    if img.ndim == 2:
+        ax.imshow(img.numpy(), cmap="gray")
+        return
+
+    if img.ndim != 3:
+        raise ValueError(f"Expected [C,H,W] or [H,W], got shape {tuple(img.shape)}")
+
+    if img.shape[0] == 1:
+        ax.imshow(img[0].numpy(), cmap="gray")
+    elif img.shape[0] in {3, 4}:
+        ax.imshow(img[:3].permute(1, 2, 0).clamp(0, 1).numpy())
+    else:
+        raise ValueError(f"Unsupported channel count: {img.shape[0]}")
+
+
 def _save_random_visual(
     img: torch.Tensor,
     save_path: Path,
@@ -661,15 +706,8 @@ def _save_random_visual(
     xlabel = _format_random_hparam_xlabel(meta)
     ylabel = _format_random_hparam_ylabel(pa, idx, parents)
 
-    img_np = img.detach().cpu().float().numpy()
-
     fig, ax = plt.subplots(figsize=(6, 6))
-    if img_np.ndim == 3 and img_np.shape[0] == 1:
-        ax.imshow(img_np[0], cmap="gray", vmin=0.0, vmax=1.0)
-    elif img_np.ndim == 3:
-        ax.imshow(np.transpose(img_np, (1, 2, 0)))
-    else:
-        ax.imshow(img_np, cmap="gray", vmin=0.0, vmax=1.0)
+    _show_image_matplotlib(ax, img)
 
     ax.set_title(title, fontsize=10)
     ax.set_xlabel(xlabel, fontsize=8)
@@ -682,121 +720,96 @@ def _save_random_visual(
     plt.close(fig)
 
 
-def _make_diff_heatmap(
-    src_img: torch.Tensor,
-    cf_img: torch.Tensor,
-) -> tuple[Image.Image, float]:
-    src_np = src_img.detach().cpu().float().numpy()
-    cf_np = cf_img.detach().cpu().float().numpy()
+def _to_gray_np(img: torch.Tensor) -> np.ndarray:
+    img_np = img.detach().cpu().float().numpy()
 
-    if src_np.ndim == 3:
-        src_gray = src_np.mean(axis=0)
-        cf_gray = cf_np.mean(axis=0)
-    else:
-        src_gray = src_np
-        cf_gray = cf_np
+    if img_np.ndim == 3:
+        if img_np.shape[0] == 1:
+            return img_np[0]
+        return img_np.mean(axis=0)
 
-    diff = cf_gray - src_gray
-    vmax = float(np.max(np.abs(diff)))
-    vmax = max(vmax, 1e-8)
+    if img_np.ndim == 2:
+        return img_np
 
-    diff_norm = (diff / vmax + 1.0) / 2.0
-    cmap = colormaps["coolwarm"]
-    diff_rgb = (cmap(diff_norm)[..., :3] * 255).astype(np.uint8)
-
-    return Image.fromarray(diff_rgb), vmax
+    raise ValueError(f"Expected [C,H,W] or [H,W], got shape {tuple(img.shape)}")
 
 
-def _render_cf_visual_with_diff(
+def _save_cf_visual_with_diff_matplotlib(
     src_img: torch.Tensor,
     cf_img: torch.Tensor,
     pa_src: dict[str, torch.Tensor],
     pa_cf: dict[str, torch.Tensor],
     idx: int,
     parents: list[str],
-    gutter: int = 12,
-    pad: int = 6,
-) -> Image.Image:
-    src_pil = to_pil_image(src_img).convert("RGB")
-    cf_pil = to_pil_image(cf_img).convert("RGB")
-    diff_pil, diff_vmax = _make_diff_heatmap(src_img, cf_img)
+    save_path: Path,
+) -> None:
+    """
+    Save input / counterfactual / difference with Matplotlib.
 
-    font = ImageFont.load_default()
+    src_img and cf_img should already be display tensors in [0, 1].
+    The input and CF panels use the same Matplotlib auto-display style as
+    the training plots. The difference panel is computed from the raw linear
+    [0, 1] tensors, not from any windowed or rescaled image.
+    """
+    src_gray = _to_gray_np(src_img)
+    cf_gray = _to_gray_np(cf_img)
 
-    title_left = "input"
-    title_mid = "cf"
-    title_right = "difference (cf - input)"
+    diff = cf_gray - src_gray
+    diff_vmax = float(np.max(np.abs(diff)))
+    diff_vmax = max(diff_vmax, 1e-8)
+
+    # Match training-style effect-map scale.
+    diff_display = diff * 255.0
+    amax = float(np.max(np.abs(diff_display)))
+    amax = max(amax, 1e-8)
 
     text_left = _format_attr_block("attrs", pa_src, idx, parents)
     text_mid = _format_attr_block("attrs", pa_cf, idx, parents)
     text_right = (
-        "heatmap\n"
         "red: cf > input\n"
         "blue: cf < input\n"
         f"max|diff|={diff_vmax:.3f}"
     )
 
-    probe = Image.new("RGB", (10, 10), "white")
-    draw_probe = ImageDraw.Draw(probe)
+    fig, axes = plt.subplots(1, 3, figsize=(13.5, 5.2))
+    
+    # print(f"src_img shape: {tuple(src_img.shape)}, dtype: {src_img.dtype}, value range: [{src_img.min().item():.3f}, {src_img.max().item():.3f}]")
+    _show_image_matplotlib(axes[0], src_img)
+    axes[0].set_title("input", fontsize=11)
+    axes[0].set_xlabel(text_left, fontsize=8)
 
-    def text_size(txt: str) -> tuple[int, int]:
-        bbox = draw_probe.multiline_textbbox((0, 0), txt, font=font, spacing=2)
-        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    # print(f"cf_img shape: {tuple(cf_img.shape)}, dtype: {cf_img.dtype}, value range: [{cf_img.min().item():.3f}, {cf_img.max().item():.3f}]")
+    _show_image_matplotlib(axes[1], cf_img)
+    axes[1].set_title("cf", fontsize=11)
+    axes[1].set_xlabel(text_mid, fontsize=8)
 
-    col_w = max(src_pil.width, cf_pil.width, diff_pil.width)
+    im = axes[2].imshow(
+        diff_display,
+        cmap="RdBu_r",
+        vmin=-amax,
+        vmax=amax,
+    )
+    axes[2].set_title("difference (cf - input)", fontsize=11)
+    axes[2].set_xlabel(text_right, fontsize=8)
 
-    _, title_h_left = text_size(title_left)
-    _, title_h_mid = text_size(title_mid)
-    _, title_h_right = text_size(title_right)
-    title_h = max(title_h_left, title_h_mid, title_h_right)
+    cbar = fig.colorbar(
+        im,
+        ax=axes[2],
+        orientation="horizontal",
+        fraction=0.046,
+        pad=0.12,
+    )
+    cbar.outline.set_visible(False)
 
-    _, text_h_left = text_size(text_left)
-    _, text_h_mid = text_size(text_mid)
-    _, text_h_right = text_size(text_right)
-    text_h = max(text_h_left, text_h_mid, text_h_right)
+    for ax in axes:
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
 
-    img_h = max(src_pil.height, cf_pil.height, diff_pil.height)
-
-    total_w = col_w * 3 + gutter * 2 + pad * 2
-    total_h = pad + title_h + pad + img_h + pad + text_h + pad
-
-    canvas = Image.new("RGB", (total_w, total_h), "white")
-    draw = ImageDraw.Draw(canvas)
-
-    cols_x = [
-        pad,
-        pad + col_w + gutter,
-        pad + 2 * (col_w + gutter),
-    ]
-
-    titles = [title_left, title_mid, title_right]
-    images = [src_pil, cf_pil, diff_pil]
-    texts = [text_left, text_mid, text_right]
-
-    for x0, title, img, txt in zip(cols_x, titles, images, texts):
-        title_bbox = draw.multiline_textbbox((0, 0), title, font=font, spacing=2)
-        title_w = title_bbox[2] - title_bbox[0]
-        draw.multiline_text(
-            (x0 + (col_w - title_w) // 2, pad),
-            title,
-            fill="black",
-            font=font,
-            spacing=2,
-        )
-
-        img_x = x0 + (col_w - img.width) // 2
-        img_y = pad + title_h + pad
-        canvas.paste(img, (img_x, img_y))
-
-        draw.multiline_text(
-            (x0, img_y + img_h + pad),
-            txt,
-            fill="black",
-            font=font,
-            spacing=2,
-        )
-
-    return canvas
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
 
 
 def save_random_samples(
@@ -812,7 +825,7 @@ def save_random_samples(
 
     vis = ((samples.clamp(-1, 1) + 1.0) / 2.0).cpu()
 
-    print(f"Range of vis: [{vis.min().item():.3f}, {vis.max().item():.3f}]")
+    assert vis.min() >= 0 and vis.max() <= 1, f"vis has out-of-range values: [{vis.min().item():.3f}, {vis.max().item():.3f}]"
 
     pa_cpu = None if pa is None else {k: v.detach().cpu() for k, v in pa.items()}
 
@@ -842,11 +855,11 @@ def save_counterfactual_samples(
     for d in save_dirs.values():
         d.mkdir(parents=True, exist_ok=True)
 
-    src_vis = ((x_src.clamp(-1, 1) + 1.0) / 2.0).cpu()
-    cf_vis = ((x_cf.clamp(-1, 1) + 1.0) / 2.0).cpu()
+    src_vis = ((x_src.clamp(-1, 1) + 1.0) / 2.0).cpu() #[0, 1] for visualization
+    cf_vis = ((x_cf.clamp(-1, 1) + 1.0) / 2.0).cpu() #[0, 1] for visualization
 
-    print(f"Range of src_vis: [{src_vis.min().item():.3f}, {src_vis.max().item():.3f}]")
-    print(f"Range of cf_vis: [{cf_vis.min().item():.3f}, {cf_vis.max().item():.3f}]")
+    assert src_vis.min() >= 0 and src_vis.max() <= 1, f"src_vis has out-of-range values: [{src_vis.min().item():.3f}, {src_vis.max().item():.3f}]"
+    assert cf_vis.min() >= 0 and cf_vis.max() <= 1, f"cf_vis has out-of-range values: [{cf_vis.min().item():.3f}, {cf_vis.max().item():.3f}]"
 
     pa_src_cpu = {k: v.detach().cpu() for k, v in pa_src.items()}
     pa_cf_cpu = {k: v.detach().cpu() for k, v in pa_cf.items()}
@@ -854,26 +867,35 @@ def save_counterfactual_samples(
     for i in range(src_vis.shape[0]):
         idx = start_idx + i
 
+        # Raw linear image saves. These are useful for quantitative inspection,
+        # but they may look different from Matplotlib auto-displayed figures.
+        # print(src_vis[i].shape, src_vis[i].dtype, src_vis[i].min().item(), src_vis[i].max().item())
+        # print(cf_vis[i].shape, cf_vis[i].dtype, cf_vis[i].min().item(), cf_vis[i].max().item())
         save_image(src_vis[i], save_dirs["inputs"] / f"{idx:06d}_input.png")
         save_image(cf_vis[i], save_dirs["cfs"] / f"{idx:06d}_cf.png")
 
-        viz_img = _render_cf_visual_with_diff(
+        # Human-readable visual, now using Matplotlib like the training plot.
+        _save_cf_visual_with_diff_matplotlib(
             src_img=src_vis[i],
             cf_img=cf_vis[i],
             pa_src=pa_src_cpu,
             pa_cf=pa_cf_cpu,
             idx=i,
             parents=parents,
+            save_path=save_dirs["cf_visuals"] / f"{idx:06d}_viz.png",
         )
-        viz_img.save(save_dirs["cf_visuals"] / f"{idx:06d}_viz.png")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", type=str, required=True)
     parser.add_argument("--save_dir", type=str, required=True)
-    parser.add_argument("--split_dir", type=str, default=None,
-                        help="Override the split_dir stored in the checkpoint.")
+    parser.add_argument(
+        "--split_dir",
+        type=str,
+        default=None,
+        help="Override the split_dir stored in the checkpoint.",
+    )
     parser.add_argument("--num_samples", type=int, default=32)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
@@ -1040,8 +1062,6 @@ def main():
                 ode_steps=args.ode_steps,
             )
 
-            print(f"Range of generated random samples: [{samples.min().item():.3f}, {samples.max().item():.3f}]")
-
             save_random_samples(
                 samples=samples,
                 save_dirs=random_save_dirs,
@@ -1059,12 +1079,17 @@ def main():
             except StopIteration:
                 src_iter = get_iterator(train_args, args.batch_size, args.split)
                 batch = next(src_iter)
-            
-            
-            x_src = preprocess_x_for_sampling(batch["x"][:bs], device)
-            
-            print(f"Range of source batch images: [{x_src.min().item():.3f}, {x_src.max().item():.3f}]")
 
+            # # Save one image for sanity checking the input image
+            # plt.imshow(batch["x"][0].permute(1, 2, 0).cpu(), cmap="gray")
+            # plt.title("Sample input image (before preprocessing)")
+            # plt.axis("off")
+            # plt.savefig("/vol/biomedic3/tx1215/mamo-flow/sample_input_image.png")
+            # plt.close()
+
+            x_src = preprocess_x_for_sampling(batch["x"][:bs], device)
+            assert x_src.max() <= 1.0 and x_src.min() >= -1.0, "Preprocessed source images should be in [-1, 1]"
+   
             pa_src = move_pa_to_device(batch["pa"], device)
             pa_src = {k: v[:bs] for k, v in pa_src.items()}
 
@@ -1106,8 +1131,7 @@ def main():
                 ode_rtol=args.ode_rtol,
                 ode_steps=args.ode_steps,
             )
-            print(f"Range of generated samples: [{x_cf.min().item():.3f}, {x_cf.max().item():.3f}]")
-
+    
             save_counterfactual_samples(
                 x_src=x_src,
                 x_cf=x_cf,
@@ -1121,6 +1145,7 @@ def main():
             print(f"Saved {produced}/{args.num_samples} outputs to {save_dir}")
 
     print(f"Done. Samples saved to: {save_dir}")
+
 
 if __name__ == "__main__":
     main()

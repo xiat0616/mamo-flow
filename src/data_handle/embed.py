@@ -473,13 +473,26 @@ class EMBED(torch.utils.data.Dataset):
         else:
             x_np, metadata, row = self._load_image_item(idx)
 
-        if x_np.ndim < 3:
-            x_np = x_np[None, ...]
+        if self.cache_spec is not None:
+            # latent mode: x_np is already latent float data
+            if x_np.ndim < 3:
+                x_np = x_np[None, ...]
 
-        x = torch.from_numpy(x_np).float() #[0,1]
+            x = torch.from_numpy(x_np).float()
 
-        if self.transform is not None:
-            x = self.transform(x)
+            if self.transform is not None:
+                x = self.transform(x)
+
+        else:
+            # image mode: x_np is uint8 image in [0, 255]
+            # DO NOT convert to float before ToPILImage / ToTensor.
+            if self.transform is not None:
+                x = self.transform(x_np)
+            else:
+                if x_np.ndim < 3:
+                    x_np = x_np[None, ...]
+                x = torch.from_numpy(x_np).float().div(255.0)
+        assert x.max() <= 1.0 and x.min() >= 0.0, f"Expected image values in [0,1], got range [{x.min().item()}, {x.max().item()}]"
 
         pa = encode_parent_metadata(metadata, self.parents)
 
@@ -504,9 +517,11 @@ class EMBED(torch.utils.data.Dataset):
 def build_image_transform(cfg: DatasetConfig) -> Callable:
     return transforms.Compose(
         [
-            transforms.ToPILImage(),
-            transforms.Resize((cfg.img_height, cfg.img_width)),
             transforms.ToTensor(),
+            transforms.Resize(
+                (cfg.img_height, cfg.img_width),
+                antialias=True,
+            ),
         ]
     )
 

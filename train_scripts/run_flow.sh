@@ -16,7 +16,7 @@ ckpt_root="${project_root}/checkpoints"
 # ============================================================
 
 # resume_exp_name="embed_flow_gpus48_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
-resume_exp_name="embed_flow_debug_flip_density_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
+# resume_exp_name="embed_flow_debug_flip_density_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
 # resume_exp_name=""
 
 mkdir -p "$ckpt_root"
@@ -105,7 +105,7 @@ else
         --betas 0.9 0.999
         --eps=1e-8
         --ema_rate=0.9999
-        --eval_freq=1000
+        --eval_freq=5000
         --num_workers=8
         --prefetch_factor=4
         --dist
