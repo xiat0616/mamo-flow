@@ -20,8 +20,8 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from torch import Tensor
 from torchvision.utils import make_grid
 
-# DEBUG=False
-DEBUG=True
+DEBUG=False
+# DEBUG=True
 
 # -----------------------------------------------------------------------------
 # Pretty-name maps for labels shown in plots

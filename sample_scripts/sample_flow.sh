@@ -1,6 +1,7 @@
 #!/bin/bash
 # exp_name="embed_flow_gpus48_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
-exp_name="embed_flow_debug_flip_density_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
+exp_name="embed_flow_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
+# exp_name="embed_flow_debug_flip_density_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
 ckpt_file="last_checkpoint.pt"
 mode="${1:?Please provide mode: rs or cf}"   # random or cf
 do_key="${2:-none}"                              # for cf key: view, cview, density
@@ -19,23 +20,23 @@ fi
 # ----------------------------
 # Sampling config
 # ----------------------------
-num_samples=10
+num_samples=100
 batch_size=4
 split="valid"
 use_ema=1
 cond_source="dataset"
 
 # Adaptive solver example:
-ode_method="dopri5"
-ode_atol="1e-5"
-ode_rtol="1e-5"
-ode_steps=""
+# ode_method="dopri5"
+# ode_atol="1e-5"
+# ode_rtol="1e-5"
+# ode_steps=""
 
 # Fixed-step solver example:
-# ode_method="midpoint"
-# ode_atol=""
-# ode_rtol=""
-# ode_steps="1000"
+ode_method="midpoint"
+ode_atol=""
+ode_rtol=""
+ode_steps="50"
 
 # -------------------------------
 # Helper: match Python _format_float_tag()
