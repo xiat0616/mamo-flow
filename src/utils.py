@@ -209,23 +209,29 @@ def get_pretrained_flux2vae() -> torch.nn.Module:
         torch_dtype=torch.bfloat16,
     )
 
+    # NOTE: monkey patch to support greyscale
     orig_encode = model.encode
+    model.encode = lambda x: orig_encode(
+        x.repeat(1, 3, 1, 1)
+    ).latent_dist.mode()
+
     orig_decode = model.decode
+    model.decode = lambda z: orig_decode(
+        z
+    ).sample.mean(dim=1, keepdim=True)
 
-    def encode_gray(x: Tensor) -> Tensor:
-        return orig_encode(x.repeat(1, 3, 1, 1)).latent_dist.sample()
+    model.register_buffer(
+        "mean",
+        torch.tensor(-0.061467)
+    )
+    model.register_buffer(
+        "std",
+        torch.tensor(1.633637)
+    )
 
-    def decode_gray(z: Tensor) -> Tensor:
-        out = orig_decode(z)
-        sample = out.sample if hasattr(out, "sample") else out
-        return sample.mean(dim=1, keepdim=True)
-
-    model.encode = encode_gray  # type: ignore[method-assign]
-    model.decode = decode_gray  # type: ignore[method-assign]
-    model.register_buffer("mean", torch.tensor(-0.061467))
-    model.register_buffer("std", torch.tensor(1.633637))
     model.requires_grad_(False)
     model.eval()
+
     return model
 
 
