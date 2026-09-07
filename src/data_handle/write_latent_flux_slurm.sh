@@ -56,9 +56,9 @@ cmd="${cmd% }"
 sbatch <<EOF
 #!/bin/bash
 #SBATCH --job-name=embed_flux2_cache
-#SBATCH --partition=gpus48
+#SBATCH --partition=gpus48,gpus24
 #SBATCH --gres=gpu:1
-#SBATCH --exclude=monal04,monal05
+#SBATCH --exclude=monal04,monal05,deepmedic2
 #SBATCH --output=${log_dir}/slurm.%j.out
 
 set -euo pipefail
