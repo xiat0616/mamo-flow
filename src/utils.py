@@ -615,7 +615,7 @@ def get_pretrained_flux2vae(
                 )
             )
             .latent_dist
-            .mode()
+            .sample()
     )
 
     # ========================================================

@@ -125,10 +125,9 @@ else
     # ========================================================
 
     patch_size=2
-
-    hidden_size=768
-    depth=12
-    num_heads=12
+    hidden_size=1024
+    depth=16
+    num_heads=16
     mlp_ratio=2.6666666666666665
 
 
@@ -136,19 +135,14 @@ else
     # Training
     # ========================================================
 
-    epochs=10000
+    epochs=1000000
 
     # Per-GPU batch size.
-    bs=256
-
+    bs=72
     lr=1e-4
-
     lr_warmup=5000
-
     wd=1e-4
-
     eval_freq=5000
-
     ema_rate=0.9999
 
 
@@ -158,7 +152,6 @@ else
 
     alpha=1.0
     sigma=0.0
-
     T=150
 
 

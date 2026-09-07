@@ -9,10 +9,10 @@ project_root="/vol/biomedic3/tx1215/mamo-flow"
 
 split_dir="${project_root}/assets/embed_splits_v1"
 data_dir="/vol/biodata/data/Mammo/EMBED/pngs/1024x768"
-out_dir="${project_root}/cache/flux2_vae_512x384_2"
+out_dir="${project_root}/cache/flux2_vae_1024x768"
 
-img_height=512
-img_width=384
+img_height=1024
+img_width=768
 
 batch_size=16
 num_workers=8
