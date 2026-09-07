@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.nn.parallel.distributed import DistributedDataParallel
 from tqdm import tqdm
 
-import wandb
+# import wandb
 from src.utils import (
     ModelEMA,
     get_mc_stats,
@@ -187,7 +187,7 @@ class Trainer:
                 elapsed = max(loader.format_dict["elapsed"], 1e-6)
                 world = dist.get_world_size() if self.is_dist else 1
                 tok_ps = bs * 1024 * world * (loader.n / elapsed)
-                wandb.log(stats | {"tokens/s": tok_ps}, self.step)
+                # wandb.log(stats | {"tokens/s": tok_ps}, self.step)
                 loader.set_postfix({"tok/s": f"{tok_ps:,.0f}"}, refresh=False)
                 loader.set_description(
                     f"train loss: {total_loss / n:.7f}, "
@@ -213,7 +213,7 @@ class Trainer:
                     mc_stats = {k: v.item() for k, v in mc_stats.items()}
 
                     print("\n" + ", ".join(f"{k}: {v:7f}" for k, v in mc_stats.items()))
-                    wandb.log(mc_stats | {"valid_mc": self.eval_mc}, self.step)
+                    # wandb.log(mc_stats | {"valid_mc": self.eval_mc}, self.step)
                     self.save_checkpoint(mc_stats["valid_loss"])
 
                     save_plots(
@@ -580,7 +580,7 @@ if __name__ == "__main__":
     vae = None
     if rank == 0:
         project_name = "mammo_flow" if args.dataset == "embed" else "cifar_flow"
-        wandb.init(project=project_name, name=args.exp_name, config=vars(args))
+        # wandb.init(project=project_name, name=args.exp_name, config=vars(args))
         for k, v in vars(args).items():
             print(f"--{k}={v}")
         num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -625,8 +625,8 @@ if __name__ == "__main__":
         now = time.strftime("%d-%m-%Y %H:%M:%S", time.localtime())
         print(f"\n{now}, Epoch {i+1}:")
         train_loss = trainer.train_epoch(dataloaders)
-        if rank == 0:
-            wandb.log({"train_loss": train_loss}, trainer.step)
+        # if rank == 0:
+        #     wandb.log({"train_loss": train_loss}, trainer.step)
 
     if is_dist:
         dist.destroy_process_group()

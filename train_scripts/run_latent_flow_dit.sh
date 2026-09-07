@@ -101,7 +101,7 @@ else
     # ========================================================
 
     cond_embedder="per_attr"
-    cond_embed_dim=256
+    cond_embed_dim=160
 
     p_uncond=0.2
 
@@ -139,13 +139,7 @@ else
     epochs=10000
 
     # Per-GPU batch size.
-    #
-    # With 2 GPUs:
-    #
-    #     bs=16
-    #     global batch = 32
-    #
-    bs=16
+    bs=256
 
     lr=1e-4
 
@@ -218,96 +212,54 @@ else
     # --------------------------------------------------------
     # DATA
     # --------------------------------------------------------
-
         --dataset="$dataset"
-
         --data_dir="$data_dir"
-
         --split_dir="$split_dir"
-
         --cache_dir="$cache_dir"
-
         --save_dir="$save_dir"
-
         --vae_ckpt=flux2
-
         --parents age view density scanner cview
-
         --img_height=$img_height
         --img_width=$img_width
         --img_channels=$img_channels
-
-
     # --------------------------------------------------------
     # TRAIN
     # --------------------------------------------------------
-
         --resume=""
-
         --exp_name="$exp_name"
-
         --seed=8
-
         --epochs=$epochs
-
         --bs=$bs
-
         --lr=$lr
-
         --lr_warmup=$lr_warmup
-
         --wd=$wd
-
         --betas 0.9 0.99
-
         --eps=1e-8
-
         --ema_rate=$ema_rate
-
         --eval_freq=$eval_freq
-
         --num_workers=8
-
         --prefetch_factor=4
-
         --dist
-
-
     # --------------------------------------------------------
     # FLOW
     # --------------------------------------------------------
-
         --alpha=$alpha
-
         --sigma=$sigma
-
         --T=$T
-
         --p_uncond=$p_uncond
-
         --cond_embedder=$cond_embedder
-
-
     # --------------------------------------------------------
     # MODEL
     #
     # argparse subcommand
     # --------------------------------------------------------
-
         dit
-
         --hidden_size=$hidden_size
-
         --depth=$depth
-
         --num_heads=$num_heads
-
         --patch_size=$patch_size
-
         --mlp_ratio=$mlp_ratio
-
         --cond_embed_dim=$cond_embed_dim
-
         --grad_checkpointing
     )
 
@@ -340,8 +292,6 @@ if [ "$partition" = "gpus48" ]; then
 #SBATCH --partition=gpus48
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
 #SBATCH --output=${save_dir}/slurm.%j.log
-
-set -euo pipefail
 
 source ~/.bashrc
 
@@ -391,7 +341,6 @@ elif [ "$partition" = "gpus24" ]; then
 #SBATCH --gres=gpu:${NPROC_PER_NODE}
 #SBATCH --output=${save_dir}/slurm.%j.log
 
-set -euo pipefail
 
 source ~/.bashrc
 
