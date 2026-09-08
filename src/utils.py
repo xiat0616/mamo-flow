@@ -441,16 +441,9 @@ def setup_distributed(
         str,
         Any,
     ] = {
-
-        "backend":
-            backend,
-
-        "world_size":
-            world_size,
-
-        "rank":
-            rank,
-
+        "backend": backend,
+        "world_size": world_size,
+        "rank": rank,
         "timeout":
             datetime.timedelta(
                 minutes=30
