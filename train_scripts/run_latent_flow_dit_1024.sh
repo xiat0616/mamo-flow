@@ -146,12 +146,12 @@ else
     # ========================================================
 
     patch_size=2
-    # hidden_size=1024
-    # depth=16
-    # num_heads=16
-    hidden_size=1536
-    depth=32
-    num_heads=24
+    hidden_size=1024
+    depth=16
+    num_heads=16
+    # hidden_size=1536
+    # depth=32
+    # num_heads=24
     mlp_ratio=2.6666666666666665
 
 
@@ -173,10 +173,10 @@ else
     # This gives a RadiT-B-like global batch size.
     # --------------------------------------------------------
 
-    bs=12
+    bs=64
     lr=1e-4
     # RadiT-style transformer training.
-    lr_warmup=5000
+    lr_warmup=2000
     wd=1e-4
     eval_freq=5000
     ema_rate=0.9999
@@ -191,7 +191,7 @@ else
 
     # Number of ODE integration points used for
     # generation / counterfactual plotting.
-    T=150
+    T=30
 
 
     # ========================================================

@@ -1,4 +1,5 @@
 import argparse
+import datetime
 import os
 import time
 
@@ -34,10 +35,10 @@ def build_datasets_and_dataloaders(args: argparse.Namespace):
     if args.dataset == "embed":
         from src.data_handle.embed import (
             CLASS_SCHEMA as EMBED_CLASS_SCHEMA,
+            DataLoaderConfig,
+            DatasetConfig,
+            get_dataloaders,
             get_embed,
-            get_dataloaders as get_embed_dataloaders,
-            DataLoaderConfig as EmbedDataLoaderConfig,
-            DatasetConfig as EmbedDatasetConfig,
         )
 
         if args.split_dir is None:
@@ -47,7 +48,7 @@ def build_datasets_and_dataloaders(args: argparse.Namespace):
             args.parents = list(EMBED_CLASS_SCHEMA)
 
         datasets = get_embed(
-            EmbedDatasetConfig(
+            DatasetConfig(
                 data_dir=args.data_dir,
                 split_dir=args.split_dir,
                 cache_dir=args.cache_dir,
@@ -58,8 +59,8 @@ def build_datasets_and_dataloaders(args: argparse.Namespace):
                 vae_ckpt=args.vae_ckpt,
             )
         )
-        dataloaders = get_embed_dataloaders(
-            EmbedDataLoaderConfig(
+        dataloaders = get_dataloaders(
+            DataLoaderConfig(
                 bs=args.bs,
                 num_workers=args.num_workers,
                 prefetch_factor=args.prefetch_factor,
@@ -72,21 +73,19 @@ def build_datasets_and_dataloaders(args: argparse.Namespace):
 
     if args.dataset == "cifar10":
         from src.data_handle.cifar import (
+            DataLoaderConfig,
+            DatasetConfig,
             get_cifar10,
-            get_dataloaders as get_cifar_dataloaders,
-            DataLoaderConfig as CifarDataLoaderConfig,
-            DatasetConfig as CifarDatasetConfig,
+            get_dataloaders,
         )
 
         if args.parents is None:
             args.parents = ["y"]
         elif args.parents != ["y"]:
-            raise ValueError(
-                f"For --dataset cifar10, expected --parents y, got {args.parents}"
-            )
+            raise ValueError(f"For --dataset cifar10, expected --parents y, got {args.parents}")
 
         datasets = get_cifar10(
-            CifarDatasetConfig(
+            DatasetConfig(
                 data_dir=args.data_dir,
                 valid_frac=args.valid_frac,
                 split_seed=args.split_seed,
@@ -96,8 +95,8 @@ def build_datasets_and_dataloaders(args: argparse.Namespace):
                 use_labels_as_pa=True,
             )
         )
-        dataloaders = get_cifar_dataloaders(
-            CifarDataLoaderConfig(
+        dataloaders = get_dataloaders(
+            DataLoaderConfig(
                 bs=args.bs,
                 num_workers=args.num_workers,
                 prefetch_factor=args.prefetch_factor,
@@ -130,16 +129,33 @@ class Trainer:
         self.ema = ema
         self.vae = vae
         self.amp_dtype = amp_dtype
+
         self.device = next(model.parameters()).device
         self.is_dist = dist.is_available() and dist.is_initialized()
         self.rank = dist.get_rank() if self.is_dist else 0
-        self.step, self.epoch = 0, 0
+
+        self.step = 0
+        self.epoch = 0
         self.best_loss = 1e6
         self.eval_mc = 8
-        self.tqdm_kwargs = dict(
-            disable=(self.rank != 0),
-            mininterval=float(os.environ.get("TQDM_MININTERVAL", 1)),
-        )
+
+        self.tqdm_kwargs = {
+            "disable": self.rank != 0,
+            "mininterval": float(os.environ.get("TQDM_MININTERVAL", 1)),
+        }
+
+        # Rank 0 may spend a long time plotting. Use a separate CPU/Gloo
+        # group so rank 1 is not sitting inside an NCCL collective.
+        self.plot_group = None
+        if self.is_dist:
+            self.plot_group = dist.new_group(
+                backend="gloo",
+                timeout=datetime.timedelta(hours=2),
+            )
+
+    def plot_barrier(self):
+        if self.is_dist:
+            dist.barrier(group=self.plot_group)
 
     def train_epoch(self, dataloaders: dict[str, torch.utils.data.DataLoader]) -> float:
         missing = {"train", "valid"} - dataloaders.keys()
@@ -148,20 +164,23 @@ class Trainer:
         self.model.train()
         dataloader = dataloaders["train"]
         loader = tqdm(enumerate(dataloader), total=len(dataloader), **self.tqdm_kwargs)
+
         total_loss = torch.tensor(0.0, device=self.device)
         n = torch.tensor(0, device=self.device)
 
         for _, batch in loader:
             x, pa = batch["x"], batch["pa"]
             bs, channels = x.shape[:2]
+
             x = x.float().to(self.device, non_blocking=True)
             pa = {k: v.to(self.device, non_blocking=True) for k, v in pa.items()}
 
-            # Datasets provide x in [0,1] for images; train in [-1,1] with dequantization
+            # Raw images: [0, 1] -> [-1, 1]. Latents (>3 channels) are untouched.
             if channels <= 3:
                 x = (x + (torch.rand_like(x) - 0.5) / 255.0).clamp(0, 1) * 2 - 1
 
             self.model.zero_grad(set_to_none=True)
+
             if self.amp_dtype is not None:
                 with torch.autocast(x.device.type, dtype=self.amp_dtype):
                     loss = self.model(x, pa, g=None)
@@ -169,7 +188,7 @@ class Trainer:
                 loss = self.model(x, pa, g=None)
 
             loss.backward()
-            stats = dict(gnorm=nn.utils.clip_grad_norm_(self.model.parameters(), 1.0))
+            stats = {"gnorm": nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)}
             self.optimizer.step()
 
             if self.scheduler is not None:
@@ -187,6 +206,7 @@ class Trainer:
                 elapsed = max(loader.format_dict["elapsed"], 1e-6)
                 world = dist.get_world_size() if self.is_dist else 1
                 tok_ps = bs * 1024 * world * (loader.n / elapsed)
+
                 # wandb.log(stats | {"tokens/s": tok_ps}, self.step)
                 loader.set_postfix({"tok/s": f"{tok_ps:,.0f}"}, refresh=False)
                 loader.set_description(
@@ -195,53 +215,77 @@ class Trainer:
                     refresh=False,
                 )
 
-            if (self.step % self.args.eval_freq) == 0:
-                t0 = time.time()
-                self.model.eval()
-                if self.ema is not None:
-                    self.ema.apply()
-
-                g = torch.Generator(device=self.device)
-                mc_losses = []
-                for k in range(self.eval_mc):
-                    g.manual_seed(self.args.seed + k)
-                    mc_losses.append(self.eval_epoch(dataloaders["valid"], g))
-
-                if self.rank == 0:
-                    mc_stats = get_mc_stats(mc_losses, prefix="valid_loss")
-                    mc_stats["valid_loss"] = mc_stats.pop("valid_loss_mean")
-                    mc_stats = {k: v.item() for k, v in mc_stats.items()}
-
-                    print("\n" + ", ".join(f"{k}: {v:7f}" for k, v in mc_stats.items()))
-                    # wandb.log(mc_stats | {"valid_mc": self.eval_mc}, self.step)
-                    self.save_checkpoint(mc_stats["valid_loss"])
-
-                    save_plots(
-                        batch_size=bs,
-                        dataset=dataloaders["valid"].dataset,
-                        model=self.model,
-                        vae=self.vae,
-                        steps=self.args.T,
-                        save_path=os.path.join(self.args.save_dir, f"{self.step}"),
-                    )
-
-                    eval_elapsed = time.time() - t0
-                    print(f"Eval time elapsed: {eval_elapsed:.2f}s")
-                    loader.start_t += eval_elapsed
-
-                if self.is_dist:
-                    dist.barrier()
-
-                del mc_losses
-                if self.ema is not None:
-                    self.ema.restore()
-                self.model.train()
+            if self.step % self.args.eval_freq == 0:
+                self.run_evaluation(dataloaders, loader, bs)
 
         self.epoch += 1
+
         if self.is_dist:
             dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
             dist.all_reduce(n, op=dist.ReduceOp.SUM)
+
         return (total_loss / n).item()
+
+    def run_evaluation(
+        self,
+        dataloaders: dict[str, torch.utils.data.DataLoader],
+        train_loader,
+        batch_size: int,
+    ):
+        eval_start = time.time()
+        self.model.eval()
+
+        if self.ema is not None:
+            self.ema.apply()
+
+        g = torch.Generator(device=self.device)
+        mc_losses = []
+
+        for k in range(self.eval_mc):
+            g.manual_seed(self.args.seed + k)
+            mc_losses.append(self.eval_epoch(dataloaders["valid"], g))
+
+        if self.rank == 0:
+            mc_stats = get_mc_stats(mc_losses, prefix="valid_loss")
+            mc_stats["valid_loss"] = mc_stats.pop("valid_loss_mean")
+            mc_stats = {k: v.item() for k, v in mc_stats.items()}
+
+            print("\n" + ", ".join(f"{k}: {v:7f}" for k, v in mc_stats.items()))
+            # wandb.log(mc_stats | {"valid_mc": self.eval_mc}, self.step)
+
+            self.save_checkpoint(mc_stats["valid_loss"])
+
+            print(f"\nStarting plots at step {self.step} with T={self.args.T}...")
+            plot_start = time.time()
+
+            save_plots(
+                batch_size=batch_size,
+                dataset=dataloaders["valid"].dataset,
+                model=unwrap(self.model),
+                vae=self.vae,
+                steps=self.args.T,
+                save_path=os.path.join(self.args.save_dir, str(self.step)),
+            )
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(self.device)
+
+            print(f"Plotting time elapsed: {time.time() - plot_start:.2f}s")
+
+        # Rank 1 waits here via Gloo rather than NCCL.
+        self.plot_barrier()
+
+        if self.rank == 0:
+            eval_elapsed = time.time() - eval_start
+            print(f"Eval + plotting time elapsed: {eval_elapsed:.2f}s")
+            train_loader.start_t += eval_elapsed
+
+        del mc_losses
+
+        if self.ema is not None:
+            self.ema.restore()
+
+        self.model.train()
 
     @torch.inference_mode()
     def eval_epoch(
@@ -251,15 +295,18 @@ class Trainer:
     ) -> torch.Tensor:
         self.model.eval()
         loader = tqdm(enumerate(dataloader), total=len(dataloader), **self.tqdm_kwargs)
+
         total_loss = torch.tensor(0.0, device=self.device)
         n = torch.tensor(0, device=self.device)
 
         for _, batch in loader:
             x, pa = batch["x"], batch["pa"]
             bs, channels = x.shape[:2]
+
             x = x.float().to(self.device, non_blocking=True)
             if channels <= 3:
                 x = x * 2 - 1
+
             pa = {k: v.to(self.device, non_blocking=True) for k, v in pa.items()}
 
             if self.amp_dtype is not None:
@@ -275,15 +322,17 @@ class Trainer:
                 elapsed = max(loader.format_dict["elapsed"], 1e-6)
                 world = dist.get_world_size() if self.is_dist else 1
                 tok_ps = bs * 1024 * world * (loader.n / elapsed)
+
                 loader.set_description(f"eval loss: {total_loss / n:.7f}", refresh=False)
                 loader.set_postfix({"tok/s": f"{tok_ps:,.0f}"}, refresh=False)
 
         if self.is_dist:
             dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
             dist.all_reduce(n, op=dist.ReduceOp.SUM)
+
         return (total_loss / n).detach()
 
-    def save_checkpoint(self, loss: float) -> None:
+    def save_checkpoint(self, loss: float):
         ckpt = {
             "model_state_dict": unwrap(self.model).state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
@@ -292,7 +341,9 @@ class Trainer:
             "step": self.step,
             "epoch": self.epoch,
         }
+
         os.makedirs(self.args.save_dir, exist_ok=True)
+
         last_path = os.path.join(self.args.save_dir, "last_checkpoint.pt")
         torch.save(ckpt, last_path)
         print(f"=> step: {self.step}, last model saved: {last_path}")
@@ -308,20 +359,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # DATA
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="embed",
-        choices=["embed", "cifar10"],
-    )
+    parser.add_argument("--dataset", type=str, default="embed", choices=["embed", "cifar10"])
     parser.add_argument("--data_dir", type=str, default=None)
-    parser.add_argument("--split_dir", type=str, default=None)   # embed only
-    parser.add_argument("--cache_dir", type=str, default=None)   # embed only
+    parser.add_argument("--split_dir", type=str, default=None)
+    parser.add_argument("--cache_dir", type=str, default=None)
     parser.add_argument("--save_dir", type=str, default=None)
     parser.add_argument("--vae_ckpt", type=str, default=None)
     parser.add_argument("--parents", nargs="+", type=str, default=None)
-    parser.add_argument("--valid_frac", type=float, default=0.05)   # cifar only
-    parser.add_argument("--split_seed", type=int, default=33)       # cifar only
+    parser.add_argument("--valid_frac", type=float, default=0.05)
+    parser.add_argument("--split_seed", type=int, default=33)
     parser.add_argument("--img_height", type=int, default=512)
     parser.add_argument("--img_width", type=int, default=384)
     parser.add_argument("--img_channels", type=int, default=1)
@@ -358,6 +404,7 @@ if __name__ == "__main__":
 
     # MODELS
     sub = parser.add_subparsers(dest="model", required=False)
+
     p_unet = sub.add_parser("unet")
     p_unet.add_argument("--model_channels", type=int, default=192)
     p_unet.add_argument("--channel_mult", nargs="+", type=int, default=[1, 2, 3, 4])
@@ -403,38 +450,43 @@ if __name__ == "__main__":
     if args.model is None:
         parser.error("Missing required subcommand: model (i.e. unet or dit)")
 
-    device, rank, world_size = (
-        setup_distributed()
-        if args.dist
-        else (torch.device("cuda:0" if torch.cuda.is_available() else "cpu"), 0, 1)
-    )
+    if args.dist:
+        device, rank, world_size = setup_distributed()
+    else:
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        rank, world_size = 0, 1
+
     is_dist = args.dist and dist.is_available() and dist.is_initialized()
 
-    if torch.cuda.get_device_capability(device)[0] >= 7:
+    if torch.cuda.is_available() and torch.cuda.get_device_capability(device)[0] >= 7:
         amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     else:
         amp_dtype = None
 
     seed_all(args.seed, args.determ)
+
     if args.resume:
         runtime_seed = int(args.seed + 7654321 * args.resume_step + rank)
         torch.manual_seed(runtime_seed)
-        torch.cuda.manual_seed_all(runtime_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(runtime_seed)
 
     datasets, dataloaders = build_datasets_and_dataloaders(args)
 
-    if args.model == "unet":
-        from src.models.embedder import (
-            GlobalCondEmbedder,
-            PerAttrCondEmbedder,
-            CondEmbedderConfig,
-            infer_parent_dims_from_batch,
-        )
-        from src.flows.flow import BlockConfig, Flow, UNetConfig
-        from src.models.unet import UNet
+    from src.models.embedder import (
+        CondEmbedderConfig,
+        GlobalCondEmbedder,
+        PerAttrCondEmbedder,
+        infer_parent_dims_from_batch,
+    )
+    from src.flows.flow import Flow
 
-        sample_batch = next(iter(dataloaders["train"]))
-        parent_dims = infer_parent_dims_from_batch(sample_batch["pa"], args.parents)
+    sample_batch = next(iter(dataloaders["train"]))
+    parent_dims = infer_parent_dims_from_batch(sample_batch["pa"], args.parents)
+
+    if args.model == "unet":
+        from src.flows.flow import BlockConfig, UNetConfig
+        from src.models.unet import UNet
 
         unet_config = UNetConfig(
             img_height=args.img_height,
@@ -462,40 +514,8 @@ if __name__ == "__main__":
 
         forward_nn = UNet(**vars(unet_config), **vars(block_config))
 
-        cond_embedder = None
-        if args.cond_embedder != "none" and len(args.parents) > 0:
-            embedder_config = CondEmbedderConfig(
-                parents=args.parents,
-                parent_dims=parent_dims,
-                cond_embed_dim=args.cond_embed_dim,
-            )
-            if args.cond_embedder == "per_attr":
-                cond_embedder = PerAttrCondEmbedder(embedder_config)
-            elif args.cond_embedder == "global":
-                cond_embedder = GlobalCondEmbedder(embedder_config)
-            else:
-                raise ValueError(f"Unknown cond_embedder: {args.cond_embedder}")
-
-        model = Flow(
-            forward_nn=forward_nn,
-            cond_embedder=cond_embedder,
-            sigma=args.sigma,
-            alpha=args.alpha,
-            p_uncond=args.p_uncond,
-            amp_dtype=amp_dtype,
-        )
     elif args.model == "dit":
-        from src.models.embedder import (
-            GlobalCondEmbedder,
-            PerAttrCondEmbedder,
-            CondEmbedderConfig,
-            infer_parent_dims_from_batch,
-        )
-        from src.flows.flow import Flow
         from src.models.DiT import DiT
-
-        sample_batch = next(iter(dataloaders["train"]))
-        parent_dims = infer_parent_dims_from_batch(sample_batch["pa"], args.parents)
 
         forward_nn = DiT(
             img_height=args.img_height,
@@ -510,35 +530,39 @@ if __name__ == "__main__":
             grad_checkpointing=args.grad_checkpointing,
         )
 
-        cond_embedder = None
-        if args.cond_embedder != "none" and len(args.parents) > 0:
-            embedder_config = CondEmbedderConfig(
-                parents=args.parents,
-                parent_dims=parent_dims,
-                cond_embed_dim=args.cond_embed_dim,
-            )
-            if args.cond_embedder == "per_attr":
-                cond_embedder = PerAttrCondEmbedder(embedder_config)
-            elif args.cond_embedder == "global":
-                cond_embedder = GlobalCondEmbedder(embedder_config)
-            else:
-                raise ValueError(f"Unknown cond_embedder: {args.cond_embedder}")
-
-        model = Flow(
-            forward_nn=forward_nn,
-            cond_embedder=cond_embedder,
-            sigma=args.sigma,
-            alpha=args.alpha,
-            p_uncond=args.p_uncond,
-            amp_dtype=amp_dtype,
-        )
     else:
         raise NotImplementedError(f"Unknown model: {args.model}")
+
+    cond_embedder = None
+
+    if args.cond_embedder != "none" and len(args.parents) > 0:
+        embedder_config = CondEmbedderConfig(
+            parents=args.parents,
+            parent_dims=parent_dims,
+            cond_embed_dim=args.cond_embed_dim,
+        )
+
+        if args.cond_embedder == "per_attr":
+            cond_embedder = PerAttrCondEmbedder(embedder_config)
+        elif args.cond_embedder == "global":
+            cond_embedder = GlobalCondEmbedder(embedder_config)
+        else:
+            raise ValueError(f"Unknown cond_embedder: {args.cond_embedder}")
+
+    model = Flow(
+        forward_nn=forward_nn,
+        cond_embedder=cond_embedder,
+        sigma=args.sigma,
+        alpha=args.alpha,
+        p_uncond=args.p_uncond,
+        amp_dtype=amp_dtype,
+    )
 
     if args.resume:
         model.load_state_dict(ckpt["model_state_dict"], strict=True)
 
     model = model.to(device)
+
     ema = ModelEMA(model.parameters(), rate=args.ema_rate)
     if args.resume and ckpt.get("ema_state") is not None:
         ema.load_state_dict(ckpt["ema_state"])
@@ -546,15 +570,10 @@ if __name__ == "__main__":
     if is_dist:
         model = DistributedDataParallel(model, device_ids=[device], bucket_cap_mb=150)
 
-    if torch.cuda.get_device_capability(device)[0] >= 7:
+    if torch.cuda.is_available() and torch.cuda.get_device_capability(device)[0] >= 7:
         print(
-            f"We do not use torch.compile as the current UNet causes tricky issues, but device {device} "
-            f"has CUDA capability"
-        )
-    else:
-        print(
-            f"Skipping torch.compile: device {device} has CUDA capability "
-            f"{torch.cuda.get_device_capability(device)}, requires >= 7.0"
+            f"We do not use torch.compile as the current UNet causes tricky issues, "
+            f"but device {device} has CUDA capability"
         )
 
     optimizer = torch.optim.AdamW(
@@ -578,11 +597,14 @@ if __name__ == "__main__":
         )
 
     vae = None
+
     if rank == 0:
         project_name = "mammo_flow" if args.dataset == "embed" else "cifar_flow"
         # wandb.init(project=project_name, name=args.exp_name, config=vars(args))
+
         for k, v in vars(args).items():
             print(f"--{k}={v}")
+
         num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"#params: {num_params:,}")
 
@@ -590,18 +612,17 @@ if __name__ == "__main__":
             vae = get_pretrained_flux2vae()
 
     print("\ntorch:", torch.__version__)
-    print(
-        "bf16 supported:",
-        torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False,
-    )
+    print("bf16 supported:", torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False)
     print("amp dtype:", amp_dtype)
     print("matmul precision:", torch.get_float32_matmul_precision())
-    print(
-        "sdpa backends enabled:",
-        torch.backends.cuda.flash_sdp_enabled(),
-        torch.backends.cuda.mem_efficient_sdp_enabled(),
-        torch.backends.cuda.math_sdp_enabled(),
-    )
+
+    if torch.cuda.is_available():
+        print(
+            "sdpa backends enabled:",
+            torch.backends.cuda.flash_sdp_enabled(),
+            torch.backends.cuda.mem_efficient_sdp_enabled(),
+            torch.backends.cuda.math_sdp_enabled(),
+        )
 
     if is_dist:
         dist.barrier()
@@ -615,6 +636,7 @@ if __name__ == "__main__":
         vae=vae,
         amp_dtype=amp_dtype,
     )
+
     if args.resume:
         trainer.step = ckpt.get("step", 0)
         trainer.epoch = ckpt.get("epoch", 0)
@@ -622,8 +644,10 @@ if __name__ == "__main__":
     for i in range(trainer.epoch, trainer.epoch + args.epochs):
         if is_dist:
             dataloaders["train"].sampler.set_epoch(i)
+
         now = time.strftime("%d-%m-%Y %H:%M:%S", time.localtime())
-        print(f"\n{now}, Epoch {i+1}:")
+        print(f"\n{now}, Epoch {i + 1}:")
+
         train_loss = trainer.train_epoch(dataloaders)
         # if rank == 0:
         #     wandb.log({"train_loss": train_loss}, trainer.step)

@@ -1,8 +1,5 @@
-from __future__ import annotations
-
 import argparse
 import json
-from contextlib import nullcontext
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -97,12 +94,7 @@ def build_dataloaders_from_train_args(
             DataLoaderConfig,
             DatasetConfig,
         )
-
-        assert train_args.img_channels == 1 or getattr(train_args, "cache_dir", None) is not None, (
-            "Embed dataset in raw-image mode currently expects single-channel images. "
-            "Latent mode may use different channel counts."
-        )
-
+        assert train_args.img_channels == 1, "Embed dataset currently only supports single-channel images. Please set --img_channels 1 when using the embed dataset."
         datasets = get_embed(
             DatasetConfig(
                 data_dir=train_args.data_dir,
@@ -115,6 +107,15 @@ def build_dataloaders_from_train_args(
                 vae_ckpt=getattr(train_args, "vae_ckpt", None),
             )
         )
+
+        # # Check the dataset batch['x'] before building dataloaders, to catch any potential issues early.
+        # sample = datasets["train"][0]
+        # print(f"Sample 'x' shape: {sample['x'].shape}, dtype: {sample['x'].dtype}, value range: [{sample['x'].min().item():.3f}, {sample['x'].max().item():.3f}]")
+        # plt.imshow(sample['x'][0].numpy(), cmap='gray')
+        # plt.title("Sample 'x' Visualization")
+        # plt.axis("off")
+        # plt.savefig("/vol/biomedic3/tx1215/mamo-flow/sample_dataset_image.png")
+        # plt.close()
 
         dataloaders = get_dataloaders(
             DataLoaderConfig(
@@ -243,242 +244,16 @@ def maybe_apply_ema(
     ema.apply()
 
 
-# ============================================================
-# Dataset / latent-mode helpers
-# ============================================================
+def get_iterator(
+    train_args: argparse.Namespace,
+    batch_size: int,
+    split: str,
+):
+    dataloaders = build_dataloaders_from_train_args(train_args, batch_size=batch_size)
+    if split not in dataloaders:
+        raise KeyError(f"Unknown split '{split}'. Available: {list(dataloaders.keys())}")
+    return iter(dataloaders[split])
 
-def _get_cache_spec(dataset: torch.utils.data.Dataset):
-    current = dataset
-    while isinstance(current, torch.utils.data.Subset):
-        current = current.dataset
-    return getattr(current, "cache_spec", None)
-
-
-def _is_latent_dataset(dataset: torch.utils.data.Dataset) -> bool:
-    return _get_cache_spec(dataset) is not None
-
-
-def _get_latent_normalization(
-    dataset: torch.utils.data.Dataset,
-    device: torch.device,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    cache_spec = _get_cache_spec(dataset)
-    if cache_spec is None:
-        return None, None
-
-    mean = torch.as_tensor(
-        cache_spec.mean,
-        dtype=torch.float32,
-        device=device,
-    ).view(1, -1, 1, 1)
-
-    std = torch.as_tensor(
-        cache_spec.std,
-        dtype=torch.float32,
-        device=device,
-    ).view(1, -1, 1, 1)
-
-    if not torch.isfinite(mean).all():
-        raise ValueError("Latent normalization mean contains NaN/Inf.")
-    if not torch.isfinite(std).all():
-        raise ValueError("Latent normalization std contains NaN/Inf.")
-    if torch.any(std <= 0):
-        raise ValueError("Latent normalization std contains non-positive values.")
-
-    return mean, std
-
-
-def get_pretrained_flux2vae() -> nn.Module:
-    from diffusers.models import AutoencoderKLFlux2
-
-    print("\nLoading FLUX.2 VAE for latent decoding...")
-
-    vae = AutoencoderKLFlux2.from_pretrained(
-        "black-forest-labs/FLUX.2-dev",
-        subfolder="vae",
-        torch_dtype=torch.bfloat16,
-    )
-
-    # Encode grayscale [B,1,H,W] by repeating to RGB first.
-    orig_encode = vae.encode
-    vae.encode = lambda x: orig_encode(x.repeat(1, 3, 1, 1)).latent_dist.sample()
-
-    # Decode to grayscale by averaging RGB channels.
-    orig_decode = vae.decode
-    vae.decode = lambda z: orig_decode(z).sample.mean(dim=1, keepdim=True)
-
-    vae.register_buffer("mean", torch.tensor(-0.061467))
-    vae.register_buffer("std", torch.tensor(1.633637))
-
-    vae.requires_grad_(False)
-    vae.eval()
-
-    return vae
-
-
-def _get_module_device(module: nn.Module) -> torch.device:
-    try:
-        return next(module.parameters()).device
-    except StopIteration:
-        try:
-            return next(module.buffers()).device
-        except StopIteration:
-            return torch.device("cpu")
-
-
-def _autocast_bf16(device: torch.device):
-    if device.type in {"cuda", "cpu"}:
-        try:
-            return torch.autocast(device_type=device.type, dtype=torch.bfloat16)
-        except Exception:
-            return nullcontext()
-    return nullcontext()
-
-
-def _maybe_get_sample(obj):
-    return obj.sample if hasattr(obj, "sample") else obj
-
-
-def _decode_with_vae(
-    x: torch.Tensor,
-    vae: nn.Module | None,
-    latent_mean: torch.Tensor | None = None,
-    latent_std: torch.Tensor | None = None,
-) -> torch.Tensor:
-    if vae is None:
-        return x
-
-    if latent_mean is None or latent_std is None:
-        raise ValueError(
-            "VAE decoding for latent flow requires latent_mean and latent_std."
-        )
-
-    vae_device = _get_module_device(vae)
-
-    x = x.to(device=vae_device, dtype=torch.float32)
-    latent_mean = latent_mean.to(device=vae_device, dtype=torch.float32)
-    latent_std = latent_std.to(device=vae_device, dtype=torch.float32)
-
-    if x.ndim != 4:
-        raise ValueError(f"Expected latent BCHW tensor, got {tuple(x.shape)}.")
-    if latent_mean.shape[1] != x.shape[1]:
-        raise ValueError(
-            f"Latent mean channel mismatch: x has {x.shape[1]} channels, "
-            f"mean has {latent_mean.shape[1]}."
-        )
-    if latent_std.shape[1] != x.shape[1]:
-        raise ValueError(
-            f"Latent std channel mismatch: x has {x.shape[1]} channels, "
-            f"std has {latent_std.shape[1]}."
-        )
-
-    # z_norm -> z_raw
-    z = x * latent_std + latent_mean
-
-    vae_dtype = next(vae.parameters()).dtype
-    z = z.to(device=vae_device, dtype=vae_dtype)
-
-    with _autocast_bf16(z.device):
-        decoded = vae.decode(z)
-
-    decoded = _maybe_get_sample(decoded)
-    return decoded.float()
-
-
-def _decode_pair_with_vae(
-    x1: torch.Tensor,
-    x2: torch.Tensor,
-    vae: nn.Module | None,
-    latent_mean: torch.Tensor | None = None,
-    latent_std: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if vae is None:
-        return x1, x2
-
-    if latent_mean is None or latent_std is None:
-        raise ValueError(
-            "VAE decoding for latent flow requires latent_mean and latent_std."
-        )
-
-    vae_device = _get_module_device(vae)
-
-    x1 = x1.to(device=vae_device, dtype=torch.float32)
-    x2 = x2.to(device=vae_device, dtype=torch.float32)
-    latent_mean = latent_mean.to(device=vae_device, dtype=torch.float32)
-    latent_std = latent_std.to(device=vae_device, dtype=torch.float32)
-
-    if x1.shape[1] != latent_mean.shape[1]:
-        raise ValueError("Latent channel mismatch between x and normalization.")
-
-    latents = torch.cat([x1, x2], dim=0)
-    z = latents * latent_std + latent_mean
-
-    vae_dtype = next(vae.parameters()).dtype
-    z = z.to(device=vae_device, dtype=vae_dtype)
-
-    with _autocast_bf16(z.device):
-        decoded = vae.decode(z)
-
-    decoded = _maybe_get_sample(decoded).float()
-    out1, out2 = decoded.chunk(2, dim=0)
-    return out1, out2
-
-
-def build_visualization_context(
-    dataset: torch.utils.data.Dataset,
-    device: torch.device,
-) -> dict:
-    latent_mode = _is_latent_dataset(dataset)
-
-    ctx = {
-        "latent_mode": latent_mode,
-        "vae": None,
-        "latent_mean": None,
-        "latent_std": None,
-    }
-
-    if latent_mode:
-        ctx["latent_mean"], ctx["latent_std"] = _get_latent_normalization(dataset, device)
-        ctx["vae"] = get_pretrained_flux2vae().to(device)
-
-    return ctx
-
-
-def decode_batch_for_saving(
-    x: torch.Tensor,
-    viz_ctx: dict,
-) -> torch.Tensor:
-    if not viz_ctx["latent_mode"]:
-        return x
-
-    return _decode_with_vae(
-        x,
-        viz_ctx["vae"],
-        latent_mean=viz_ctx["latent_mean"],
-        latent_std=viz_ctx["latent_std"],
-    )
-
-
-def decode_pair_for_saving(
-    x1: torch.Tensor,
-    x2: torch.Tensor,
-    viz_ctx: dict,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if not viz_ctx["latent_mode"]:
-        return x1, x2
-
-    return _decode_pair_with_vae(
-        x1,
-        x2,
-        viz_ctx["vae"],
-        latent_mean=viz_ctx["latent_mean"],
-        latent_std=viz_ctx["latent_std"],
-    )
-
-
-# ============================================================
-# Batch / conditioning helpers
-# ============================================================
 
 def move_pa_to_device(
     pa: dict[str, torch.Tensor],
@@ -490,18 +265,16 @@ def move_pa_to_device(
 def preprocess_x_for_sampling(
     x: torch.Tensor,
     device: torch.device,
-    latent_mode: bool,
 ) -> torch.Tensor:
     """
-    Raw-image mode:
-        dataloader image [0,1] -> model image [-1,1]
+    Match the training preview path:
+        dataloader image [0, 1] -> model image [-1, 1]
 
-    Latent mode:
-        dataloader already returns normalized latent.
-        Do NOT apply x * 2 - 1.
+    Do not clamp here. This is model input preprocessing, not visualization.
     """
     x = x.float().to(device, non_blocking=True)
-    if not latent_mode:
+    channels = x.shape[1]
+    if channels <= 3:
         x = x * 2.0 - 1.0
     return x
 
@@ -534,17 +307,17 @@ def _schema_num_classes(
             return None
         return int(spec)
 
+    # Fallback: infer from one-hot tensor.
     if ref.shape[-1] > 1:
         return int(ref.shape[-1])
 
     raise KeyError(
-        f"Unknown intervention key '{do_key}'. "
-        f"Available schema keys: {list(class_schema.keys())}"
+        f"Unknown intervention key '{do_key}'. Available schema keys: {list(class_schema.keys())}"
     )
 
 
 def _as_index_tensor(x: torch.Tensor) -> torch.Tensor:
-    if x.shape[-1] > 1:
+    if x.shape[-1] > 1:  # one-hot encoded
         return x.argmax(dim=-1)
     return x.view(-1).round().long()
 
@@ -563,9 +336,7 @@ def apply_single_intervention(
         raise ValueError(f"do_key must be provided for do_mode='{do_mode}'")
 
     if do_key not in pa:
-        raise KeyError(
-            f"Intervention key '{do_key}' not found in pa. Available: {list(pa.keys())}"
-        )
+        raise KeyError(f"Intervention key '{do_key}' not found in pa. Available: {list(pa.keys())}")
 
     pa_cf = clone_pa(pa)
     ref = pa_cf[do_key]
@@ -578,16 +349,14 @@ def apply_single_intervention(
                 f"Use --do_mode random instead."
             )
         if pa_rand is None or do_key not in pa_rand:
-            raise ValueError(
-                f"Random intervention for '{do_key}' requires a random source batch."
-            )
+            raise ValueError(f"Random intervention for '{do_key}' requires a random source batch.")
         pa_cf[do_key] = pa_rand[do_key].clone()
         return pa_cf
 
     orig_idx = _as_index_tensor(ref)
 
     def _to_pa(new_idx: torch.Tensor) -> torch.Tensor:
-        if ref.shape[-1] > 1:
+        if ref.shape[-1] > 1:  # one-hot
             one_hot = torch.zeros_like(ref)
             one_hot.scatter_(-1, new_idx.unsqueeze(-1), 1.0)
             return one_hot
@@ -604,9 +373,7 @@ def apply_single_intervention(
 
     if do_mode == "random":
         if pa_rand is None or do_key not in pa_rand:
-            raise ValueError(
-                f"Random intervention for '{do_key}' requires a random source batch."
-            )
+            raise ValueError(f"Random intervention for '{do_key}' requires a random source batch.")
 
         rand_idx = _as_index_tensor(pa_rand[do_key]).clamp(min=0, max=num_classes - 1)
         same = rand_idx == orig_idx
@@ -626,10 +393,6 @@ def apply_single_intervention(
 
     raise ValueError(f"Unknown do_mode: {do_mode}")
 
-
-# ============================================================
-# ODE generation / inversion
-# ============================================================
 
 def generate_random_from_noise(
     model: nn.Module,
@@ -711,10 +474,6 @@ def generate_from_inverted_noise(
     )
     return traj[-1]
 
-
-# ============================================================
-# Paths / metadata formatting
-# ============================================================
 
 def get_ckpt_tag(ckpt_path: str) -> str:
     return Path(ckpt_path).stem
@@ -827,7 +586,7 @@ def _get_pa_scalar(pa: dict[str, torch.Tensor], key: str, idx: int) -> float:
     if v.ndim == 0:
         return float(v.detach().cpu().item())
     vi = v[idx]
-    if vi.numel() > 1:
+    if vi.numel() > 1:  # one-hot encoded
         return float(vi.argmax().item())
     return float(vi.item())
 
@@ -909,19 +668,16 @@ def _format_random_hparam_ylabel(
     )
 
 
-# ============================================================
-# Visualization helpers
-# ============================================================
-
 def _show_image_matplotlib(ax: plt.Axes, img: torch.Tensor) -> None:
     """
     Matplotlib display matching the training plotting style.
 
     For single-channel images, intentionally do not pass vmin/vmax.
-    Matplotlib then uses auto display scaling.
+    Matplotlib then uses auto display scaling, which is why the training
+    plots looked less washed out than direct PIL/to_pil_image rendering.
     """
     img = img.detach().cpu().float()
-
+    # print(f"Image shape: {tuple(img.shape)}, dtype: {img.dtype}, value range: [{img.min().item():.3f}, {img.max().item():.3f}]")
     if img.ndim == 2:
         ax.imshow(img.numpy(), cmap="gray")
         return
@@ -990,7 +746,10 @@ def _save_cf_visual_with_diff_matplotlib(
     """
     Save input / counterfactual / difference with Matplotlib.
 
-    src_img and cf_img should already be display tensors in [0,1].
+    src_img and cf_img should already be display tensors in [0, 1].
+    The input and CF panels use the same Matplotlib auto-display style as
+    the training plots. The difference panel is computed from the raw linear
+    [0, 1] tensors, not from any windowed or rescaled image.
     """
     src_gray = _to_gray_np(src_img)
     cf_gray = _to_gray_np(cf_img)
@@ -999,6 +758,7 @@ def _save_cf_visual_with_diff_matplotlib(
     diff_vmax = float(np.max(np.abs(diff)))
     diff_vmax = max(diff_vmax, 1e-8)
 
+    # Match training-style effect-map scale.
     diff_display = diff * 255.0
     amax = float(np.max(np.abs(diff_display)))
     amax = max(amax, 1e-8)
@@ -1012,11 +772,13 @@ def _save_cf_visual_with_diff_matplotlib(
     )
 
     fig, axes = plt.subplots(1, 3, figsize=(13.5, 5.2))
-
+    
+    # print(f"src_img shape: {tuple(src_img.shape)}, dtype: {src_img.dtype}, value range: [{src_img.min().item():.3f}, {src_img.max().item():.3f}]")
     _show_image_matplotlib(axes[0], src_img)
     axes[0].set_title("input", fontsize=11)
     axes[0].set_xlabel(text_left, fontsize=8)
 
+    # print(f"cf_img shape: {tuple(cf_img.shape)}, dtype: {cf_img.dtype}, value range: [{cf_img.min().item():.3f}, {cf_img.max().item():.3f}]")
     _show_image_matplotlib(axes[1], cf_img)
     axes[1].set_title("cf", fontsize=11)
     axes[1].set_xlabel(text_mid, fontsize=8)
@@ -1051,24 +813,19 @@ def _save_cf_visual_with_diff_matplotlib(
 
 
 def save_random_samples(
-    samples_img: torch.Tensor,
+    samples: torch.Tensor,
     save_dirs: dict[str, Path],
     start_idx: int,
     pa: dict[str, torch.Tensor] | None,
     parents: list[str],
     meta: dict,
 ) -> None:
-    """
-    samples_img must already be image-space tensors in [-1,1].
-    """
     for d in save_dirs.values():
         d.mkdir(parents=True, exist_ok=True)
 
-    vis = ((samples_img.clamp(-1, 1) + 1.0) / 2.0).cpu()
+    vis = ((samples.clamp(-1, 1) + 1.0) / 2.0).cpu()
 
-    assert vis.min() >= 0 and vis.max() <= 1, (
-        f"vis has out-of-range values: [{vis.min().item():.3f}, {vis.max().item():.3f}]"
-    )
+    assert vis.min() >= 0 and vis.max() <= 1, f"vis has out-of-range values: [{vis.min().item():.3f}, {vis.max().item():.3f}]"
 
     pa_cpu = None if pa is None else {k: v.detach().cpu() for k, v in pa.items()}
 
@@ -1087,29 +844,22 @@ def save_random_samples(
 
 
 def save_counterfactual_samples(
-    x_src_img: torch.Tensor,
-    x_cf_img: torch.Tensor,
+    x_src: torch.Tensor,
+    x_cf: torch.Tensor,
     pa_src: dict[str, torch.Tensor],
     pa_cf: dict[str, torch.Tensor],
     parents: list[str],
     save_dirs: dict[str, Path],
     start_idx: int,
 ) -> None:
-    """
-    x_src_img and x_cf_img must already be image-space tensors in [-1,1].
-    """
     for d in save_dirs.values():
         d.mkdir(parents=True, exist_ok=True)
 
-    src_vis = ((x_src_img.clamp(-1, 1) + 1.0) / 2.0).cpu()
-    cf_vis = ((x_cf_img.clamp(-1, 1) + 1.0) / 2.0).cpu()
+    src_vis = ((x_src.clamp(-1, 1) + 1.0) / 2.0).cpu() #[0, 1] for visualization
+    cf_vis = ((x_cf.clamp(-1, 1) + 1.0) / 2.0).cpu() #[0, 1] for visualization
 
-    assert src_vis.min() >= 0 and src_vis.max() <= 1, (
-        f"src_vis has out-of-range values: [{src_vis.min().item():.3f}, {src_vis.max().item():.3f}]"
-    )
-    assert cf_vis.min() >= 0 and cf_vis.max() <= 1, (
-        f"cf_vis has out-of-range values: [{cf_vis.min().item():.3f}, {cf_vis.max().item():.3f}]"
-    )
+    assert src_vis.min() >= 0 and src_vis.max() <= 1, f"src_vis has out-of-range values: [{src_vis.min().item():.3f}, {src_vis.max().item():.3f}]"
+    assert cf_vis.min() >= 0 and cf_vis.max() <= 1, f"cf_vis has out-of-range values: [{cf_vis.min().item():.3f}, {cf_vis.max().item():.3f}]"
 
     pa_src_cpu = {k: v.detach().cpu() for k, v in pa_src.items()}
     pa_cf_cpu = {k: v.detach().cpu() for k, v in pa_cf.items()}
@@ -1117,9 +867,14 @@ def save_counterfactual_samples(
     for i in range(src_vis.shape[0]):
         idx = start_idx + i
 
+        # Raw linear image saves. These are useful for quantitative inspection,
+        # but they may look different from Matplotlib auto-displayed figures.
+        # print(src_vis[i].shape, src_vis[i].dtype, src_vis[i].min().item(), src_vis[i].max().item())
+        # print(cf_vis[i].shape, cf_vis[i].dtype, cf_vis[i].min().item(), cf_vis[i].max().item())
         save_image(src_vis[i], save_dirs["inputs"] / f"{idx:06d}_input.png")
         save_image(cf_vis[i], save_dirs["cfs"] / f"{idx:06d}_cf.png")
 
+        # Human-readable visual, now using Matplotlib like the training plot.
         _save_cf_visual_with_diff_matplotlib(
             src_img=src_vis[i],
             cf_img=cf_vis[i],
@@ -1130,26 +885,6 @@ def save_counterfactual_samples(
             save_path=save_dirs["cf_visuals"] / f"{idx:06d}_viz.png",
         )
 
-
-# ============================================================
-# Loader iteration helpers
-# ============================================================
-
-def next_batch(
-    loader: torch.utils.data.DataLoader,
-    iterator,
-):
-    try:
-        batch = next(iterator)
-    except StopIteration:
-        iterator = iter(loader)
-        batch = next(iterator)
-    return batch, iterator
-
-
-# ============================================================
-# Main
-# ============================================================
 
 def main():
     parser = argparse.ArgumentParser()
@@ -1172,7 +907,7 @@ def main():
         type=str,
         default="rs",
         choices=["rs", "cf"],
-        help="rs: sample from Gaussian noise; cf: generate counterfactuals from real images.",
+        help="random: sample from Gaussian noise; cf: generate counterfactuals from real images.",
     )
     parser.add_argument(
         "--cond_source",
@@ -1200,10 +935,7 @@ def main():
         "--ode_steps",
         type=int,
         default=None,
-        help=(
-            "Number of intervals on [0,1] for the external time grid. "
-            "Especially useful for fixed-step solvers."
-        ),
+        help="Number of intervals on [0,1] for the external time grid. Especially useful for fixed-step solvers.",
     )
 
     args = parser.parse_args()
@@ -1230,17 +962,6 @@ def main():
     model.eval()
 
     class_schema = get_class_schema(train_args)
-
-    # Build dataloaders once and reuse them.
-    dataloaders = build_dataloaders_from_train_args(train_args, batch_size=args.batch_size)
-    if args.split not in dataloaders:
-        raise KeyError(f"Unknown split '{args.split}'. Available: {list(dataloaders.keys())}")
-
-    split_loader = dataloaders[args.split]
-    dataset = split_loader.dataset
-
-    viz_ctx = build_visualization_context(dataset, device)
-    print(f"Sampling data space: {'latent' if viz_ctx['latent_mode'] else 'pixel'}")
 
     if args.mode == "rs":
         random_save_dirs = build_random_save_dirs(
@@ -1276,9 +997,16 @@ def main():
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
-    cond_iter = iter(split_loader) if args.mode == "rs" and args.cond_source == "dataset" else None
-    src_iter = iter(split_loader) if args.mode == "cf" else None
-    rand_iter = iter(split_loader) if args.mode == "cf" and args.do_mode == "random" else None
+    cond_iter = None
+    if args.mode == "rs" and args.cond_source == "dataset":
+        cond_iter = get_iterator(train_args, args.batch_size, args.split)
+
+    src_iter = None
+    rand_iter = None
+    if args.mode == "cf":
+        src_iter = get_iterator(train_args, args.batch_size, args.split)
+        if args.do_mode == "random":
+            rand_iter = get_iterator(train_args, args.batch_size, args.split)
 
     meta = {
         "ckpt": args.ckpt,
@@ -1295,7 +1023,6 @@ def main():
         "ode_atol": None if args.ode_steps is not None else args.ode_atol,
         "ode_rtol": None if args.ode_steps is not None else args.ode_rtol,
         "ode_steps": args.ode_steps,
-        "data_space": "latent" if viz_ctx["latent_mode"] else "pixel",
     }
 
     with open(save_dir / "sampling_args.json", "w") as f:
@@ -1316,7 +1043,12 @@ def main():
 
             pa = None
             if cond_iter is not None:
-                batch, cond_iter = next_batch(split_loader, cond_iter)
+                try:
+                    batch = next(cond_iter)
+                except StopIteration:
+                    cond_iter = get_iterator(train_args, args.batch_size, args.split)
+                    batch = next(cond_iter)
+
                 pa = move_pa_to_device(batch["pa"], device)
                 pa = {k: v[:bs] for k, v in pa.items()}
 
@@ -1330,10 +1062,8 @@ def main():
                 ode_steps=args.ode_steps,
             )
 
-            samples_img = decode_batch_for_saving(samples, viz_ctx)
-
             save_random_samples(
-                samples_img=samples_img,
+                samples=samples,
                 save_dirs=random_save_dirs,
                 start_idx=produced,
                 pa=pa,
@@ -1344,20 +1074,33 @@ def main():
             print(f"Saved {produced}/{args.num_samples} random samples to {save_dir}")
 
         elif args.mode == "cf":
-            batch, src_iter = next_batch(split_loader, src_iter)
+            try:
+                batch = next(src_iter)
+            except StopIteration:
+                src_iter = get_iterator(train_args, args.batch_size, args.split)
+                batch = next(src_iter)
 
-            x_src = preprocess_x_for_sampling(
-                batch["x"][:bs],
-                device=device,
-                latent_mode=viz_ctx["latent_mode"],
-            )
+            # # Save one image for sanity checking the input image
+            # plt.imshow(batch["x"][0].permute(1, 2, 0).cpu(), cmap="gray")
+            # plt.title("Sample input image (before preprocessing)")
+            # plt.axis("off")
+            # plt.savefig("/vol/biomedic3/tx1215/mamo-flow/sample_input_image.png")
+            # plt.close()
 
+            x_src = preprocess_x_for_sampling(batch["x"][:bs], device)
+            assert x_src.max() <= 1.0 and x_src.min() >= -1.0, "Preprocessed source images should be in [-1, 1]"
+   
             pa_src = move_pa_to_device(batch["pa"], device)
             pa_src = {k: v[:bs] for k, v in pa_src.items()}
 
             pa_rand = None
             if args.do_mode == "random":
-                rand_batch, rand_iter = next_batch(split_loader, rand_iter)
+                try:
+                    rand_batch = next(rand_iter)
+                except StopIteration:
+                    rand_iter = get_iterator(train_args, args.batch_size, args.split)
+                    rand_batch = next(rand_iter)
+
                 pa_rand = move_pa_to_device(rand_batch["pa"], device)
                 pa_rand = {k: v[:bs] for k, v in pa_rand.items()}
 
@@ -1388,12 +1131,10 @@ def main():
                 ode_rtol=args.ode_rtol,
                 ode_steps=args.ode_steps,
             )
-
-            x_src_img, x_cf_img = decode_pair_for_saving(x_src, x_cf, viz_ctx)
-
+    
             save_counterfactual_samples(
-                x_src_img=x_src_img,
-                x_cf_img=x_cf_img,
+                x_src=x_src,
+                x_cf=x_cf,
                 pa_src=pa_src,
                 pa_cf=pa_cf,
                 parents=train_args.parents,
