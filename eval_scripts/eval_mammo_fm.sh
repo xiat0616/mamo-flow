@@ -6,11 +6,33 @@
 
 project_root="/vol/biomedic3/tx1215/mamo-flow"
 
-run_dir="${project_root}/sampling_results/embed_latent_flow_flux2_dit_b2_128_96_condemb_per_attr_cdim_160_puncond_0.2/last_checkpoint/ode-dopri5_atol-1e-5_rtol-1e-5/paired_view_cfs/MLO_to_CC/test"
+# exp_name="embed_latent_flow_flux2_dit_b4_128_96_condemb_per_attr_cdim_160_puncond_0.2"
+# exp_name="embed_latent_flow_small_bs_flux2_dit_b2_64_48_condemb_per_attr_cdim_160_puncond_0.2"
+exp_name="embed_flow_debug_flip_density_128_96_condemb_per_attr_mchannel_32_puncond_0.2"
+# exp_name="embed_latent_flow_xl_flux2_dit_b4_128_96_condemb_per_attr_cdim_160_puncond_0.2"
+
+view_cfs="MLO_to_CC"
+# view_cfs="CC_to_MLO"
+
+run_dir="${project_root}/sampling_results/${exp_name}/last_checkpoint/ode-dopri5_atol-1e-5_rtol-1e-5/paired_view_cfs/${view_cfs}/test"
+
+# ============================================================
+# Evaluation hyperparameters
+# ============================================================
+
+height=1024
+width=768
+
+# height=512
+# width=384
+
+
+# height=128
+# width=96
 
 batch_size=4
 num_workers=4
-bootstrap_samples=5000
+bootstrap_samples=1000
 seed=0
 save_features=0
 
@@ -38,6 +60,8 @@ fi
 
 ARGS=(
     --run_dir "$run_dir"
+    --height "$height"
+    --width "$width"
     --batch_size "$batch_size"
     --num_workers "$num_workers"
     --bootstrap_samples "$bootstrap_samples"
@@ -66,6 +90,8 @@ echo "============================================================"
 echo "Mammo-FM counterfactual evaluation"
 echo "============================================================"
 echo "Run directory      : $run_dir"
+echo "Input height       : $height"
+echo "Input width        : $width"
 echo "Batch size         : $batch_size"
 echo "Num workers        : $num_workers"
 echo "Bootstrap samples  : $bootstrap_samples"
@@ -101,6 +127,7 @@ echo "============================================================"
 echo "Host: \$(hostname)"
 echo "Job:  \$SLURM_JOB_ID"
 echo "Run directory: ${run_dir}"
+echo "Input size: ${height} x ${width}"
 echo "============================================================"
 
 nvidia-smi
